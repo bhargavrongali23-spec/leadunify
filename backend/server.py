@@ -1269,12 +1269,35 @@ async def bulk_remove_from_campaign(
     return {"ok": True, "removed": result.deleted_count}
 
 
+def _is_non_empty_people_filter(payload_dict: dict) -> bool:
+    """Guard rail: bulk-by-filter endpoints must have at least ONE narrowing
+    field or they would iterate the whole people collection. Fields that just
+    control pagination/sorting do NOT count."""
+    ignore = {"page", "page_size", "sort", "sort_order", "sort_by", "sort_dir", "campaign_id"}
+    for k, v in payload_dict.items():
+        if k in ignore:
+            continue
+        if v is None:
+            continue
+        if isinstance(v, str) and v.strip() == "":
+            continue
+        if isinstance(v, (list, dict)) and len(v) == 0:
+            continue
+        return True
+    return False
+
+
 @api.post("/people/delete-by-filter")
 async def delete_people_by_filter(payload: PeopleQuery, user: dict = Depends(get_current_user)):
     """Delete EVERY person matching the given filter (all pages, not just
     visible). Admin only. Returns how many were removed."""
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
+    if not _is_non_empty_people_filter(payload.model_dump()):
+        raise HTTPException(
+            status_code=400,
+            detail="Refusing to delete without at least one filter — this would remove every contact.",
+        )
     q = await _build_people_query(payload.model_dump())
     # Collect all matching ids first so we can also purge their person_campaigns.
     ids: List[str] = []
@@ -1299,7 +1322,22 @@ async def remove_by_filter_from_campaign(
     """Remove EVERY person matching the given filter from a specific campaign.
     The person records themselves stay; only the person_campaigns links are
     dropped for the specified campaign."""
-    q = await _build_people_query(payload.model_dump(exclude={"campaign_id"}))
+    # Owner-or-admin gate — you can only bulk-remove people from a campaign you
+    # actually own (or if you're an admin).
+    if not ObjectId.is_valid(payload.campaign_id):
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    camp = await db.campaigns.find_one({"_id": ObjectId(payload.campaign_id)})
+    if not camp:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if user.get("role") != "admin" and camp.get("owner_id") != str(user["_id"]):
+        raise HTTPException(status_code=403, detail="Only the campaign owner or an admin can bulk-remove")
+    filter_dict = payload.model_dump(exclude={"campaign_id"})
+    if not _is_non_empty_people_filter(filter_dict):
+        raise HTTPException(
+            status_code=400,
+            detail="Refusing to remove without at least one filter — this would clear the whole campaign.",
+        )
+    q = await _build_people_query(filter_dict)
     ids: List[str] = []
     async for d in db.people.find(q, {"_id": 1}):
         ids.append(str(d["_id"]))

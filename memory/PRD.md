@@ -27,6 +27,41 @@ campaigns; scale target 10–50k contacts.
 - **Auth:** JWT Bearer + httpOnly cookie (both work). Token cached in
   `localStorage['leadunify_access_token']` so multipart uploads never lose auth.
 
+## Implemented (v1.2 — 2026-07-01)
+
+### Bulk delete by full filter set — NEW (P1)
+
+- New backend endpoints (admin/owner-gated, minimum-filter-guarded):
+  - `POST /api/people/delete-by-filter` — admin only. 400 if the filter payload
+    has no narrowing field (safety guard against accidental full-table wipe).
+    Deletes every matching person + purges their `person_campaigns` links.
+  - `POST /api/people/remove-by-filter-from-campaign` — campaign owner or
+    admin. 400 if no narrowing field. Drops the `person_campaigns` links only
+    for the specified campaign; the person records + other campaign links
+    stay intact.
+- `_is_non_empty_people_filter()` helper enforces the guard (ignores
+  pagination/sort keys).
+- Frontend banner: when all visible rows are selected AND more matching rows
+  exist off-page, an indigo banner appears — `Select all N matching this
+  filter` (data-testid=`select-all-matching`). Toggling it enters
+  `selectAllMatching` mode where Delete + Export buttons operate on the whole
+  filter server-side.
+- Delete + Export button labels + counts reflect `effectiveSelectionCount`
+  (either `selectedIds.size` or `data.total`).
+
+### Bulk-share multiple campaigns at once — NEW (P1)
+
+- New backend endpoint: `POST /api/campaigns/bulk-share` with
+  `{campaign_ids:[], user_ids:[]}`. Per-campaign owner/admin check — campaigns
+  the caller can't share are reported back in `skipped` (with reason). Invalid
+  user ids are silently dropped.
+- Frontend: each owner/admin-accessible campaign card now has a checkbox
+  (data-testid=`select-campaign-<id>`). When at least one is ticked, a
+  `Clear (N)` + `Share N selected` action bar appears in the header. The
+  bulk-share dialog (data-testid=`bulk-share-dialog`) lists selected
+  campaigns as chips, and a multi-select checkbox list of teammates.
+  Confirmation shows shared/skipped counts.
+
 ## Implemented (v1.1 — 2026-07-01)
 
 ### Custom columns per campaign (Excel-style tracking) — NEW
@@ -110,9 +145,6 @@ campaigns; scale target 10–50k contacts.
   GOOGLE_CLIENT_ID; add GOOGLE_CLIENT_SECRET to `/app/backend/.env` and
   restart backend. UI flow is already wired. (User deferred this — will
   update secret later.)
-- **P1 — Bulk delete by all-matching-filter** (not just currently-visible
-  page). Currently limited to selected on visible pages.
-- **P1 — Bulk share** — share multiple campaigns at once.
 - **P1 — Person merge tool** on the Duplicate review queue is functional but
   a manual "merge two arbitrary people" UI (side-panel button) is not yet
   wired.
@@ -121,11 +153,13 @@ campaigns; scale target 10–50k contacts.
 - **P2 — Password self-serve reset for members** (currently only admin can
   reset).
 - **P2 — "Flag for enrichment"** currently only toggles a DB flag; wire to a
-  real enrichment API (Lusha, LI Sales Nav, etc.) in v2.
+  real enrichment API (Lusha, LI Sales Nav, etc.) in v2. **Requires user to
+  provide API key for the chosen provider.**
 - **P2 — In-app onboarding tour** for new invitees.
-- **P2 — Refactor**: split `backend/server.py` (2333 lines) into
+- **P2 — Refactor**: split `backend/server.py` (2460+ lines) into
   `routes/people.py`, `routes/campaigns.py`, `routes/columns.py`, etc.
-  Extract `PeopleTable` from `pages/People.jsx` (>1000 lines).
+  Extract `PeopleTable` from `pages/People.jsx` (>1100 lines). Convert the
+  N-round-trip bulk-share loop to a single `bulk_write` for latency.
 
 ## Test seed
 
