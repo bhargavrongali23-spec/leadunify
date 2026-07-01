@@ -10,6 +10,7 @@ import CampaignsPage from "@/pages/Campaigns";
 import ImportPage from "@/pages/Import";
 import DuplicatesPage from "@/pages/Duplicates";
 import DashboardPage from "@/pages/Dashboard";
+import TeamPage from "@/pages/Team";
 import { Toaster } from "@/components/ui/sonner";
 
 function LoginRedirectIfAuthed({ children }) {
@@ -45,6 +46,7 @@ export default function App() {
             <Route path="/campaigns" element={<CampaignsPage />} />
             <Route path="/import" element={<ImportPage />} />
             <Route path="/duplicates" element={<DuplicatesPage />} />
+            <Route path="/team" element={<TeamPage />} />
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="*" element={<Navigate to="/people" replace />} />
           </Route>

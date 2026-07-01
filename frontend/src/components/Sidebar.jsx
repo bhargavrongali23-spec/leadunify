@@ -9,6 +9,7 @@ import {
   MessageSquare,
   LogOut,
   Sparkles,
+  UserCog,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { Button } from "@/components/ui/button";
@@ -76,6 +77,23 @@ export default function Sidebar({ onOpenChat, duplicatesCount = 0 }) {
             </NavLink>
           );
         })}
+
+        {user?.role === "admin" && (
+          <NavLink
+            to="/team"
+            data-testid="nav-team"
+            className={({ isActive }) =>
+              `group flex items-center gap-2.5 px-3 py-2 rounded-md text-[13px] font-medium transition-colors ${
+                isActive
+                  ? "bg-indigo-50 text-indigo-700"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-50"
+              }`
+            }
+          >
+            <UserCog className="w-4 h-4 text-slate-400 group-hover:text-slate-600" strokeWidth={2} />
+            <span className="flex-1">Team</span>
+          </NavLink>
+        )}
 
         <div className="mt-4 border-t border-slate-100 pt-3">
           <button

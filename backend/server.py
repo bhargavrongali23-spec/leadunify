@@ -186,6 +186,11 @@ async def _startup() -> None:
     await db.import_batches.create_index("created_at")
     await db.saved_filters.create_index("owner_id")
     await db.oauth_states.create_index("created_at", expireAfterSeconds=900)
+    await db.access_requests.create_index([("status", 1), ("created_at", -1)])
+    await db.access_requests.create_index("user_id")
+    await db.access_requests.create_index("campaign_id")
+    await db.campaigns.create_index("owner_id")
+    await db.campaigns.create_index("shared_with_user_ids")
 
     # seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@vaultedge.com").lower()
@@ -212,6 +217,14 @@ async def _startup() -> None:
         canon = normalize_company_name(c.get("name"))
         if canon:
             await db.companies.update_one({"_id": c["_id"]}, {"$set": {"canonical_name": canon}})
+
+    # Ensure the admin owns any legacy campaign that has no owner_id
+    admin = await db.users.find_one({"role": "admin"}, {"_id": 1})
+    if admin:
+        await db.campaigns.update_many(
+            {"$or": [{"owner_id": None}, {"owner_id": {"$exists": False}}]},
+            {"$set": {"owner_id": str(admin["_id"]), "shared_with_user_ids": []}},
+        )
 
     # seed demo data (only if empty)
     result = await seed_demo_data(db)
@@ -476,8 +489,24 @@ class CampaignInput(BaseModel):
 
 
 @api.get("/campaigns")
-async def list_campaigns(_: dict = Depends(get_current_user)):
-    cursor = db.campaigns.find({}).sort("created_at", -1)
+async def list_campaigns(scope: str = "mine", user: dict = Depends(get_current_user)):
+    """List campaigns.
+
+    scope='mine' (default) — admins see all, members see owned + shared.
+    scope='all' — admin sees all; members also see all so they can request access.
+    """
+    is_admin = user.get("role") == "admin"
+    uid = str(user["_id"])
+    query: dict = {}
+    if not is_admin and scope != "all":
+        query = {
+            "$or": [
+                {"owner_id": uid},
+                {"shared_with_user_ids": uid},
+                {"owner_id": None},  # legacy campaigns w/o owner remain visible
+            ]
+        }
+    cursor = db.campaigns.find(query).sort("created_at", -1)
     campaigns = [serialize_doc(d) async for d in cursor]
     if campaigns:
         pipeline = [
@@ -486,6 +515,9 @@ async def list_campaigns(_: dict = Depends(get_current_user)):
         counts = {d["_id"]: d["count"] async for d in db.person_campaigns.aggregate(pipeline)}
         for c in campaigns:
             c["people_count"] = counts.get(c["id"], 0)
+            c["is_owner"] = (c.get("owner_id") == uid)
+            c["is_shared_with_me"] = uid in (c.get("shared_with_user_ids") or [])
+            c["has_access"] = is_admin or c["is_owner"] or c["is_shared_with_me"] or c.get("owner_id") is None
     return {"items": campaigns}
 
 
@@ -498,6 +530,8 @@ async def create_campaign(payload: CampaignInput, user: dict = Depends(get_curre
         "category": payload.category,
         "status": payload.status or "Active",
         "description": payload.description,
+        "owner_id": str(user["_id"]),
+        "shared_with_user_ids": [],
         "created_at": utc_now_iso(),
     }
     result = await db.campaigns.insert_one(doc)
@@ -605,7 +639,19 @@ async def _build_people_query(filters: dict) -> dict:
     if filters.get("company_id"):
         ands.append({"company_id": filters["company_id"]})
     if filters.get("company_name"):
-        ands.append({"company_name": {"$regex": f"^{re.escape(filters['company_name'])}$", "$options": "i"}})
+        # Case-insensitive SUBSTRING match, so typing "HDFC" finds "HDFC Bank".
+        ands.append({
+            "company_name": {"$regex": re.escape(filters["company_name"]), "$options": "i"}
+        })
+    if filters.get("in_companies"):
+        # Match by exact company_id OR by exact company_name (any of the given).
+        cids = filters["in_companies"]
+        ands.append({
+            "$or": [
+                {"company_id": {"$in": cids}},
+                {"company_name": {"$in": cids}},
+            ]
+        })
 
     if filters.get("tag"):
         ands.append({"tags": filters["tag"]})
@@ -670,6 +716,7 @@ class PeopleQuery(BaseModel):
     search: Optional[str] = None
     company_id: Optional[str] = None
     company_name: Optional[str] = None
+    in_companies: Optional[List[str]] = None
     tag: Optional[str] = None
     source: Optional[str] = None
     in_campaigns: Optional[List[str]] = None
@@ -1669,6 +1716,270 @@ async def sheets_preview(payload: SheetsImportPreview, user: dict = Depends(get_
         "preview_rows": rows[:10],
         "total_rows": len(rows),
     }
+
+
+# ---------------------------------------------------------------------------
+# Team / users management (admin only)
+# ---------------------------------------------------------------------------
+def _admin_only(user: dict) -> None:
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+
+
+class InviteUserInput(BaseModel):
+    email: str
+    name: Optional[str] = None
+    role: str = "member"  # "admin" | "member"
+    password: Optional[str] = None  # optional; auto-generated if omitted
+
+
+class UserPatchInput(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+    password: Optional[str] = None  # admin reset
+
+
+@api.get("/users")
+async def list_users(user: dict = Depends(get_current_user)):
+    _admin_only(user)
+    cursor = db.users.find({}, {"password_hash": 0}).sort("created_at", -1)
+    items = []
+    async for d in cursor:
+        items.append({
+            "id": str(d["_id"]),
+            "email": d["email"],
+            "name": d.get("name", "User"),
+            "role": d.get("role", "member"),
+            "created_at": d.get("created_at"),
+        })
+    return {"items": items}
+
+
+@api.post("/users/invite")
+async def invite_user(payload: InviteUserInput, user: dict = Depends(get_current_user)):
+    """Create a new team member. Returns the temporary password so the admin
+    can share it with the invitee. (This is an internal tool — no email is sent.)"""
+    _admin_only(user)
+    email = payload.email.strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Valid email is required")
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(status_code=400, detail="A user with this email already exists")
+    if payload.role not in ("admin", "member"):
+        raise HTTPException(status_code=400, detail="Role must be admin or member")
+
+    temp_password = payload.password or secrets.token_urlsafe(9)
+    doc = {
+        "email": email,
+        "password_hash": hash_password(temp_password),
+        "name": payload.name or email.split("@")[0].capitalize(),
+        "role": payload.role,
+        "created_at": utc_now_iso(),
+    }
+    result = await db.users.insert_one(doc)
+    return {
+        "user": {
+            "id": str(result.inserted_id),
+            "email": email,
+            "name": doc["name"],
+            "role": doc["role"],
+            "created_at": doc["created_at"],
+        },
+        "temporary_password": temp_password,
+    }
+
+
+@api.patch("/users/{user_id}")
+async def update_user(user_id: str, payload: UserPatchInput, user: dict = Depends(get_current_user)):
+    _admin_only(user)
+    try:
+        oid = ObjectId(user_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid user id")
+    updates: dict = {}
+    if payload.name is not None:
+        updates["name"] = payload.name.strip()
+    if payload.role is not None:
+        if payload.role not in ("admin", "member"):
+            raise HTTPException(status_code=400, detail="Role must be admin or member")
+        updates["role"] = payload.role
+    if payload.password:
+        updates["password_hash"] = hash_password(payload.password)
+    if not updates:
+        return {"ok": True}
+    await db.users.update_one({"_id": oid}, {"$set": updates})
+    return {"ok": True}
+
+
+@api.delete("/users/{user_id}")
+async def delete_user(user_id: str, user: dict = Depends(get_current_user)):
+    _admin_only(user)
+    if user_id == str(user["_id"]):
+        raise HTTPException(status_code=400, detail="You cannot delete your own account")
+    try:
+        oid = ObjectId(user_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid user id")
+    await db.users.delete_one({"_id": oid})
+    # Remove the user's shares
+    await db.campaigns.update_many({}, {"$pull": {"shared_with_user_ids": user_id}})
+    # Reassign owned campaigns to admin (current caller) — safer than deleting
+    await db.campaigns.update_many({"owner_id": user_id}, {"$set": {"owner_id": str(user["_id"])}})
+    await db.access_requests.delete_many({"user_id": user_id})
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Campaign sharing + access requests
+# ---------------------------------------------------------------------------
+class ShareCampaignInput(BaseModel):
+    user_ids: List[str]
+
+
+@api.post("/campaigns/{campaign_id}/share")
+async def share_campaign(
+    campaign_id: str, payload: ShareCampaignInput, user: dict = Depends(get_current_user)
+):
+    try:
+        oid = ObjectId(campaign_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid campaign id")
+    camp = await db.campaigns.find_one({"_id": oid})
+    if not camp:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    uid = str(user["_id"])
+    is_admin = user.get("role") == "admin"
+    if not is_admin and camp.get("owner_id") != uid:
+        raise HTTPException(status_code=403, detail="Only the owner or an admin can share this campaign")
+
+    # dedupe + validate the user ids exist
+    valid_ids = []
+    for user_id in payload.user_ids:
+        if not ObjectId.is_valid(user_id):
+            continue
+        u = await db.users.find_one({"_id": ObjectId(user_id)}, {"_id": 1})
+        if u:
+            valid_ids.append(str(u["_id"]))
+    await db.campaigns.update_one(
+        {"_id": oid},
+        {"$addToSet": {"shared_with_user_ids": {"$each": valid_ids}}},
+    )
+    doc = await db.campaigns.find_one({"_id": oid})
+    return serialize_doc(doc)
+
+
+class UnshareCampaignInput(BaseModel):
+    user_id: str
+
+
+@api.post("/campaigns/{campaign_id}/unshare")
+async def unshare_campaign(
+    campaign_id: str, payload: UnshareCampaignInput, user: dict = Depends(get_current_user)
+):
+    try:
+        oid = ObjectId(campaign_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid campaign id")
+    camp = await db.campaigns.find_one({"_id": oid})
+    if not camp:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if user.get("role") != "admin" and camp.get("owner_id") != str(user["_id"]):
+        raise HTTPException(status_code=403, detail="Only the owner or admin can un-share")
+    await db.campaigns.update_one({"_id": oid}, {"$pull": {"shared_with_user_ids": payload.user_id}})
+    return {"ok": True}
+
+
+@api.post("/campaigns/{campaign_id}/request-access")
+async def request_campaign_access(campaign_id: str, user: dict = Depends(get_current_user)):
+    try:
+        oid = ObjectId(campaign_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid campaign id")
+    camp = await db.campaigns.find_one({"_id": oid})
+    if not camp:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    uid = str(user["_id"])
+    # Already has access
+    if user.get("role") == "admin" or camp.get("owner_id") == uid or uid in (camp.get("shared_with_user_ids") or []):
+        return {"ok": True, "already_has_access": True}
+    # Already requested and pending
+    existing = await db.access_requests.find_one({
+        "campaign_id": campaign_id, "user_id": uid, "status": "pending",
+    })
+    if existing:
+        return {"ok": True, "already_requested": True}
+    await db.access_requests.insert_one({
+        "campaign_id": campaign_id,
+        "campaign_name": camp["name"],
+        "user_id": uid,
+        "user_email": user["email"],
+        "user_name": user.get("name", "User"),
+        "status": "pending",
+        "created_at": utc_now_iso(),
+    })
+    return {"ok": True, "requested": True}
+
+
+@api.get("/access-requests")
+async def list_access_requests(user: dict = Depends(get_current_user)):
+    """Admins see all pending requests. Non-admin owners see requests for
+    campaigns they own."""
+    is_admin = user.get("role") == "admin"
+    uid = str(user["_id"])
+    if is_admin:
+        query = {"status": "pending"}
+    else:
+        owned = [str(c["_id"]) async for c in db.campaigns.find({"owner_id": uid}, {"_id": 1})]
+        if not owned:
+            return {"items": []}
+        query = {"status": "pending", "campaign_id": {"$in": owned}}
+    items = []
+    async for d in db.access_requests.find(query).sort("created_at", -1).limit(200):
+        items.append(serialize_doc(d))
+    return {"items": items}
+
+
+class AccessRequestAction(BaseModel):
+    action: str  # "approve" | "deny"
+
+
+@api.post("/access-requests/{req_id}/action")
+async def action_access_request(
+    req_id: str, payload: AccessRequestAction, user: dict = Depends(get_current_user)
+):
+    try:
+        oid = ObjectId(req_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid request id")
+    req = await db.access_requests.find_one({"_id": oid})
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    is_admin = user.get("role") == "admin"
+    campaign_id = req["campaign_id"]
+    camp = await db.campaigns.find_one({"_id": ObjectId(campaign_id)})
+    if not camp:
+        raise HTTPException(status_code=404, detail="Campaign no longer exists")
+    if not is_admin and camp.get("owner_id") != str(user["_id"]):
+        raise HTTPException(status_code=403, detail="Not authorized to act on this request")
+
+    if payload.action == "approve":
+        await db.campaigns.update_one(
+            {"_id": ObjectId(campaign_id)},
+            {"$addToSet": {"shared_with_user_ids": req["user_id"]}},
+        )
+        await db.access_requests.update_one({"_id": oid}, {"$set": {"status": "approved"}})
+    elif payload.action == "deny":
+        await db.access_requests.update_one({"_id": oid}, {"$set": {"status": "denied"}})
+    else:
+        raise HTTPException(status_code=400, detail="Unknown action")
+    return {"ok": True}
+
+
+@api.get("/my-access-requests")
+async def my_access_requests(user: dict = Depends(get_current_user)):
+    """Requests the current user has made — so they can see their pending status."""
+    cursor = db.access_requests.find({"user_id": str(user["_id"])}).sort("created_at", -1).limit(50)
+    return {"items": [serialize_doc(d) async for d in cursor]}
 
 
 # ---------------------------------------------------------------------------

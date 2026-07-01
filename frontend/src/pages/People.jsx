@@ -522,7 +522,7 @@ export default function PeoplePage() {
           </Popover>
 
           <Input
-            placeholder="Company"
+            placeholder="Company contains…"
             value={companyFilter}
             data-testid="filter-company-input"
             onChange={(e) => {

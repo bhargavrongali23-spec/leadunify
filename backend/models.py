@@ -137,6 +137,8 @@ class Campaign(BaseDocument):
     category: Optional[str] = None  # Introductory / Event / Nurture / Product / Other
     status: str = "Active"  # Active / Paused / Completed
     description: Optional[str] = None
+    owner_id: Optional[str] = None
+    shared_with_user_ids: List[str] = Field(default_factory=list)
     created_at: str = Field(default_factory=utc_now_iso)
 
 
