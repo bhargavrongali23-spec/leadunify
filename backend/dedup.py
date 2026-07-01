@@ -64,6 +64,69 @@ def domain_from_email(email: str) -> Optional[str]:
     return email.split("@", 1)[1].lower()
 
 
+# Common suffixes / boilerplate that appear in legal company names but shouldn't
+# affect matching. Ordered longest-first so multi-word phrases are removed cleanly.
+_COMPANY_STOP_WORDS = [
+    "private limited", "pvt ltd", "pvt limited", "pvt",
+    "public limited company", "limited liability company",
+    "incorporated", "corporation", "corp",
+    "company", "co",
+    "limited", "ltd", "llc", "llp", "plc", "lp",
+    "gmbh", "ag", "sa", "sarl", "sas", "srl", "nv", "bv", "oy", "ab", " apb",
+    "holdings", "holding", "group", "inc",
+]
+
+# We also strip industry words when they appear at the *end* — e.g.
+# "Texas Bank Financial" should match "Texas Bank" — but NOT when they are
+# core to the name, so we only strip trailing tokens.
+_TRAILING_INDUSTRY_TOKENS = {
+    "financial", "financials", "finance", "lending", "loans", "loan",
+    "mortgage", "mortgages", "capital", "partners", "solutions", "services",
+    "advisors", "consulting",
+}
+
+
+def normalize_company_name(name: Optional[str]) -> Optional[str]:
+    """Return a canonical form of a company name for fuzzy match/merge detection.
+
+    "A and D Mortgage LLC", "A and D Mortgage", "A & D Mortgage, LLC" -> "a and d mortgage"
+    "Texas Bank Pvt Ltd", "Texas Bank Financial" -> "texas bank" (trailing industry word)
+    Returns None for falsy input. Never returns an empty string — if suffix
+    stripping empties the name we fall back to the lower-cased original.
+    """
+    if not name:
+        return None
+    original_lower = str(name).lower().strip()
+    if not original_lower or original_lower in {"nan", "none", "null"}:
+        return None
+    s = original_lower
+    # Normalize ampersand and punctuation
+    s = s.replace("&", " and ")
+    s = re.sub(r"[\.\,\(\)\-/\\']", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+
+    # Remove corporate suffixes (as whole words)
+    for suffix in _COMPANY_STOP_WORDS:
+        s = re.sub(rf"\b{re.escape(suffix)}\b", " ", s)
+
+    s = re.sub(r"\s+", " ", s).strip()
+
+    # Strip a single trailing industry token if the name still has >=2 tokens
+    tokens = s.split()
+    while len(tokens) >= 2 and tokens[-1] in _TRAILING_INDUSTRY_TOKENS:
+        tokens.pop()
+    s = " ".join(tokens).strip()
+
+    # If normalization stripped everything (e.g. "Company Inc" -> ""), fall back
+    # to the lower-cased original so we still have a stable canonical key.
+    if not s:
+        fallback = re.sub(r"[^a-z0-9\s]", " ", original_lower)
+        fallback = re.sub(r"\s+", " ", fallback).strip()
+        return fallback or None
+
+    return s
+
+
 def similar(a: str, b: str) -> float:
     if not a or not b:
         return 0.0
@@ -91,12 +154,23 @@ async def find_person_by_phone(db, phone: str) -> Optional[dict]:
 
 
 async def find_soft_duplicate(db, full_name: str, company_name: Optional[str]) -> Optional[dict]:
-    """Look up by name+company similarity (no hard identifier)."""
+    """Look up by name+company similarity (no hard identifier).
+
+    Uses first-token prefix on full_name to scope the scan — a "James O'Connor"
+    row will only compare against people whose full_name begins with "James",
+    keeping the check O(k) for k=matching-first-token instead of O(n).
+    """
     if not full_name:
         return None
-    cursor = db.people.find({}, {
-        "full_name": 1, "company_name": 1, "primary_email": 1,
-    }).limit(500)
+    first_token = full_name.strip().split()[0] if full_name.strip() else None
+    if not first_token or len(first_token) < 2:
+        return None
+    # Case-insensitive prefix — small candidate set even at 50k people.
+    prefix_re = re.compile(f"^{re.escape(first_token)}", re.IGNORECASE)
+    cursor = db.people.find(
+        {"full_name": prefix_re},
+        {"full_name": 1, "company_name": 1, "primary_email": 1},
+    ).limit(200)
     async for doc in cursor:
         n_score = similar(full_name, doc.get("full_name") or "")
         if n_score < 0.85:
@@ -106,19 +180,30 @@ async def find_soft_duplicate(db, full_name: str, company_name: Optional[str]) -
             if c_score >= 0.7:
                 return doc
         elif not company_name:
-            # name-only match with very high similarity
             if n_score >= 0.95:
                 return doc
     return None
 
 
 async def get_or_create_company(db, name: Optional[str], email: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """Returns (company_id, company_name)."""
+    """Returns (company_id, company_name).
+
+    Match order:
+      1. Exact case-insensitive name match
+      2. Canonical (normalized) name match — handles "A & D Mortgage" vs "A and D Mortgage LLC"
+      3. Domain match (for domain-derived names)
+    """
     if not name and not email:
         return None, None
 
     if name:
         existing = await db.companies.find_one({"name": {"$regex": f"^{re.escape(name)}$", "$options": "i"}})
+        if existing:
+            return str(existing["_id"]), existing["name"]
+
+    canonical = normalize_company_name(name)
+    if canonical:
+        existing = await db.companies.find_one({"canonical_name": canonical})
         if existing:
             return str(existing["_id"]), existing["name"]
 
@@ -129,10 +214,13 @@ async def get_or_create_company(db, name: Optional[str], email: Optional[str]) -
         if existing:
             return str(existing["_id"]), existing["name"]
         name = domain.split(".")[0].capitalize()
+        canonical = normalize_company_name(name)
 
     doc = {
         "name": name,
         "email_domain": domain,
+        "canonical_name": canonical,
+        "notes": None,
         "created_at": utc_now_iso(),
     }
     result = await db.companies.insert_one(doc)

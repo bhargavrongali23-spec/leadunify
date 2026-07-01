@@ -169,14 +169,21 @@ async def _startup() -> None:
     await db.people.create_index("linkedin_url")
     await db.people.create_index("phones")
     await db.people.create_index("company_id")
+    await db.people.create_index("company_name")
+    await db.people.create_index("updated_at")
+    await db.people.create_index("created_at")
+    await db.people.create_index("full_name")
     await db.people.create_index([("full_name", "text"), ("primary_email", "text"), ("company_name", "text")])
     await db.companies.create_index("name")
     await db.companies.create_index("email_domain")
+    await db.companies.create_index("canonical_name")
     await db.campaigns.create_index("name")
     await db.person_campaigns.create_index([("person_id", 1), ("campaign_id", 1)], unique=True)
     await db.person_campaigns.create_index("campaign_id")
     await db.person_campaigns.create_index("person_id")
     await db.duplicate_flags.create_index("status")
+    await db.duplicate_flags.create_index("created_at")
+    await db.import_batches.create_index("created_at")
     await db.saved_filters.create_index("owner_id")
     await db.oauth_states.create_index("created_at", expireAfterSeconds=900)
 
@@ -198,6 +205,13 @@ async def _startup() -> None:
             {"email": admin_email},
             {"$set": {"password_hash": hash_password(admin_password)}},
         )
+
+    # Back-fill canonical_name for pre-existing companies (safe to run every startup)
+    from dedup import normalize_company_name
+    async for c in db.companies.find({"canonical_name": {"$in": [None, ""]}}, {"name": 1}):
+        canon = normalize_company_name(c.get("name"))
+        if canon:
+            await db.companies.update_one({"_id": c["_id"]}, {"$set": {"canonical_name": canon}})
 
     # seed demo data (only if empty)
     result = await seed_demo_data(db)
@@ -291,15 +305,25 @@ def serialize_doc(doc: Optional[dict]) -> Optional[dict]:
 @api.get("/companies")
 async def list_companies(
     q: Optional[str] = None,
-    limit: int = 200,
+    page: int = 1,
+    page_size: int = 200,
     _: dict = Depends(get_current_user),
 ):
+    """Paginated companies list. Use page/page_size for scale. `q` is a
+    case-insensitive substring match on the name."""
     query: dict = {}
     if q:
         query["name"] = {"$regex": re.escape(q), "$options": "i"}
-    cursor = db.companies.find(query).sort("name", 1).limit(min(limit, 500))
+    total = await db.companies.count_documents(query)
+    page = max(1, page)
+    page_size = max(1, min(page_size, 500))
+    cursor = (
+        db.companies.find(query)
+        .sort("name", 1)
+        .skip((page - 1) * page_size)
+        .limit(page_size)
+    )
     companies = [serialize_doc(d) async for d in cursor]
-    # add people counts
     if companies:
         ids = [c["id"] for c in companies]
         pipeline = [
@@ -309,7 +333,103 @@ async def list_companies(
         counts = {d["_id"]: d["count"] async for d in db.people.aggregate(pipeline)}
         for c in companies:
             c["people_count"] = counts.get(c["id"], 0)
-    return {"items": companies}
+    return {"items": companies, "total": total, "page": page, "page_size": page_size}
+
+
+@api.get("/companies/lookup/by-name")
+async def lookup_company_by_name(name: str, _: dict = Depends(get_current_user)):
+    """Find a company by its exact (case-insensitive) name — used by People
+    view when navigating via ?company=<name>."""
+    doc = await db.companies.find_one(
+        {"name": {"$regex": f"^{re.escape(name)}$", "$options": "i"}}
+    )
+    if not doc:
+        return {"company": None}
+    company = serialize_doc(doc)
+    company["people_count"] = await db.people.count_documents({"company_id": company["id"]})
+    return {"company": company}
+
+
+@api.get("/companies/merge-candidates")
+async def company_merge_candidates(_: dict = Depends(get_current_user)):
+    """Return groups of companies that appear to be the same organization based
+    on canonical_name (normalized form). Only groups with 2+ companies returned."""
+    pipeline = [
+        {"$match": {"canonical_name": {"$nin": [None, ""]}}},
+        {"$group": {
+            "_id": "$canonical_name",
+            "companies": {"$push": {
+                "id": {"$toString": "$_id"},
+                "name": "$name",
+                "email_domain": "$email_domain",
+            }},
+            "count": {"$sum": 1},
+        }},
+        {"$match": {"count": {"$gt": 1}}},
+        {"$sort": {"count": -1}},
+    ]
+    groups = []
+    async for g in db.companies.aggregate(pipeline):
+        for c in g["companies"]:
+            c["people_count"] = await db.people.count_documents({"company_id": c["id"]})
+        groups.append({
+            "canonical_name": g["_id"],
+            "companies": g["companies"],
+            "count": g["count"],
+        })
+    return {"groups": groups}
+
+
+class CompanyMergeInput(BaseModel):
+    keep_company_id: str
+    merge_company_ids: List[str]
+
+
+@api.post("/companies/merge")
+async def merge_companies(payload: CompanyMergeInput, user: dict = Depends(get_current_user)):
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        keep_oid = ObjectId(payload.keep_company_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid company id")
+    keep = await db.companies.find_one({"_id": keep_oid})
+    if not keep:
+        raise HTTPException(status_code=404, detail="Company to keep not found")
+    keep_id = str(keep["_id"])
+
+    merged_ids = [mid for mid in payload.merge_company_ids if mid != keep_id]
+    if not merged_ids:
+        return {"ok": True, "moved": 0}
+
+    result = await db.people.update_many(
+        {"company_id": {"$in": merged_ids}},
+        {"$set": {"company_id": keep_id, "company_name": keep["name"], "updated_at": utc_now_iso()}},
+    )
+    moved = result.modified_count
+
+    disappearing = []
+    async for c in db.companies.find(
+        {"_id": {"$in": [ObjectId(m) for m in merged_ids if ObjectId.is_valid(m)]}}
+    ):
+        if c.get("notes"):
+            disappearing.append(f"[from {c['name']}]\n{c['notes']}")
+    if disappearing:
+        merged_notes = keep.get("notes") or ""
+        if merged_notes:
+            merged_notes += "\n\n"
+        merged_notes += "\n\n".join(disappearing)
+        await db.companies.update_one({"_id": keep_oid}, {"$set": {"notes": merged_notes}})
+
+    await db.companies.delete_many(
+        {"_id": {"$in": [ObjectId(m) for m in merged_ids if ObjectId.is_valid(m)]}}
+    )
+    return {"ok": True, "moved": moved, "deleted": len(merged_ids)}
+
+
+class CompanyPatch(BaseModel):
+    name: Optional[str] = None
+    notes: Optional[str] = None
 
 
 @api.get("/companies/{company_id}")
@@ -324,6 +444,25 @@ async def get_company(company_id: str, _: dict = Depends(get_current_user)):
     doc = serialize_doc(doc)
     doc["people_count"] = await db.people.count_documents({"company_id": company_id})
     return doc
+
+
+@api.patch("/companies/{company_id}")
+async def update_company(
+    company_id: str, payload: CompanyPatch, _: dict = Depends(get_current_user)
+):
+    try:
+        oid = ObjectId(company_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid company id")
+    updates = {k: v for k, v in payload.model_dump(exclude_none=True).items()}
+    if "name" in updates:
+        from dedup import normalize_company_name
+        updates["canonical_name"] = normalize_company_name(updates["name"])
+    if not updates:
+        return {"ok": True}
+    await db.companies.update_one({"_id": oid}, {"$set": updates})
+    doc = await db.companies.find_one({"_id": oid})
+    return serialize_doc(doc)
 
 
 # ---------------------------------------------------------------------------
@@ -747,6 +886,43 @@ async def delete_person(person_id: str, user: dict = Depends(get_current_user)):
     return {"ok": True}
 
 
+class BulkDeleteInput(BaseModel):
+    ids: List[str]
+
+
+@api.post("/people/bulk-delete")
+async def bulk_delete_people(payload: BulkDeleteInput, user: dict = Depends(get_current_user)):
+    """Completely remove the selected people (from every campaign, every list)."""
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    if not payload.ids:
+        return {"ok": True, "deleted": 0}
+    oids = [ObjectId(i) for i in payload.ids if ObjectId.is_valid(i)]
+    result = await db.people.delete_many({"_id": {"$in": oids}})
+    await db.person_campaigns.delete_many({"person_id": {"$in": payload.ids}})
+    return {"ok": True, "deleted": result.deleted_count}
+
+
+class BulkRemoveFromCampaignInput(BaseModel):
+    ids: List[str]
+    campaign_id: str
+
+
+@api.post("/people/bulk-remove-from-campaign")
+async def bulk_remove_from_campaign(
+    payload: BulkRemoveFromCampaignInput, user: dict = Depends(get_current_user)
+):
+    """Remove the selected people from ONE specific campaign only. Their
+    Person records and other campaign links stay intact."""
+    if not payload.ids:
+        return {"ok": True, "removed": 0}
+    result = await db.person_campaigns.delete_many({
+        "person_id": {"$in": payload.ids},
+        "campaign_id": payload.campaign_id,
+    })
+    return {"ok": True, "removed": result.deleted_count}
+
+
 # ---------------------------------------------------------------------------
 # Import — preview + commit
 # ---------------------------------------------------------------------------
@@ -1013,10 +1189,19 @@ async def list_batches(_: dict = Depends(get_current_user)):
 # Export — CSV/XLSX matching current filter
 # ---------------------------------------------------------------------------
 @api.post("/people/export")
-async def export_people(payload: PeopleQuery, format: str = "csv", user: dict = Depends(get_current_user)):
-    filters = payload.model_dump()
-    q = await _build_people_query(filters)
-    cursor = db.people.find(q).limit(50000)
+async def export_people(payload: PeopleQuery, format: str = "csv", ids: Optional[str] = None, user: dict = Depends(get_current_user)):
+    """Export the current filter as CSV/XLSX. If `ids` (comma-separated) is
+    provided, ONLY those people are exported (used for the 'Export selected' flow)."""
+    if ids:
+        id_list = [i.strip() for i in ids.split(",") if i.strip()]
+        oids = [ObjectId(i) for i in id_list if ObjectId.is_valid(i)]
+        cursor = db.people.find({"_id": {"$in": oids}})
+    else:
+        filters = payload.model_dump()
+        q = await _build_people_query(filters)
+        # 200k is a generous ceiling; the UI paginates so full-list exports over this
+        # threshold are extremely rare. We can raise this if it ever becomes a limit.
+        cursor = db.people.find(q).limit(200000)
     docs = [d async for d in cursor]
     people = await _hydrate_people(docs)
 
@@ -1031,6 +1216,7 @@ async def export_people(payload: PeopleQuery, format: str = "csv", user: dict = 
             "Company": p.get("company_name"),
             "Title": p.get("job_title"),
             "Campaigns": ", ".join(c["name"] for c in p.get("campaigns", [])),
+            "Notes": p.get("notes"),
             "Tags": ", ".join(p.get("tags") or []),
             "Last Updated": p.get("updated_at"),
         })

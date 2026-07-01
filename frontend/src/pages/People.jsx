@@ -2,6 +2,7 @@ import { useMemo, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { openPerson } from "@/components/AppLayout";
 import { CampaignChip } from "@/components/CampaignChip";
+import NotesCell from "@/components/NotesCell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -23,9 +24,18 @@ import {
   Loader2,
   Save,
   Upload,
+  Trash2,
 } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 
 export default function PeoplePage() {
   const navigate = useNavigate();
@@ -48,6 +58,8 @@ export default function PeoplePage() {
   const [saveName, setSaveName] = useState("");
   const [activeCampaignInfo, setActiveCampaignInfo] = useState(null);
   const [activeCompanyInfo, setActiveCompanyInfo] = useState(null);
+  const [activeCompany, setActiveCompany] = useState(null); // full company doc (for notes editor)
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
 
   // Re-sync when the URL changes (e.g., user clicks a different campaign card).
   useEffect(() => {
@@ -130,22 +142,112 @@ export default function PeoplePage() {
 
   const totalPages = Math.max(1, Math.ceil((data.total || 0) / pageSize));
 
+  // Load full company doc (with notes) when navigating with ?company=<name>
+  useEffect(() => {
+    if (!companyFilter) {
+      setActiveCompany(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .get("/companies/lookup/by-name", { params: { name: companyFilter } })
+      .then(({ data }) => {
+        if (!cancelled) setActiveCompany(data.company || null);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [companyFilter]);
+
+  // Clear selection when filters change
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [debounced, companyFilter, inCampaigns.join(","), notInCampaigns.join(","), page]);
+
   const exportCsv = async (format) => {
     try {
-      const response = await api.post(
-        `/people/export?format=${format}`,
-        filters,
-        { responseType: "blob" }
-      );
-      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const hasSelection = selectedIds.size > 0;
+      const url = hasSelection
+        ? `/people/export?format=${format}&ids=${Array.from(selectedIds).join(",")}`
+        : `/people/export?format=${format}`;
+      const response = await api.post(url, filters, { responseType: "blob" });
+      const blobUrl = window.URL.createObjectURL(new Blob([response.data]));
       const a = document.createElement("a");
-      a.href = url;
+      a.href = blobUrl;
       a.download = format === "xlsx" ? "people_export.xlsx" : "people_export.csv";
       a.click();
-      window.URL.revokeObjectURL(url);
-      toast.success("Export downloaded");
-    } catch (e) {
+      window.URL.revokeObjectURL(blobUrl);
+      toast.success(
+        hasSelection
+          ? `Exported ${selectedIds.size} selected`
+          : "Export downloaded"
+      );
+    } catch (_e) {
       toast.error("Export failed");
+    }
+  };
+
+  const toggleSelect = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const allVisibleSelected =
+    data.items.length > 0 && data.items.every((p) => selectedIds.has(p.id));
+
+  const toggleSelectAllVisible = () => {
+    if (allVisibleSelected) {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        data.items.forEach((p) => next.delete(p.id));
+        return next;
+      });
+    } else {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        data.items.forEach((p) => next.add(p.id));
+        return next;
+      });
+    }
+  };
+
+  const updateRowNotes = (personId, newNotes) => {
+    setData((d) => ({
+      ...d,
+      items: d.items.map((p) => (p.id === personId ? { ...p, notes: newNotes } : p)),
+    }));
+  };
+
+  const [confirmDelete, setConfirmDelete] = useState(null);
+
+  const runBulkDelete = async (mode) => {
+    const ids = Array.from(selectedIds);
+    if (!ids.length) return;
+    try {
+      if (mode === "all") {
+        const { data } = await api.post("/people/bulk-delete", { ids });
+        toast.success(`Deleted ${data.deleted} contact${data.deleted === 1 ? "" : "s"}`);
+      } else if (mode === "campaign" && activeCampaignInfo) {
+        const { data } = await api.post("/people/bulk-remove-from-campaign", {
+          ids,
+          campaign_id: activeCampaignInfo.id,
+        });
+        toast.success(
+          `Removed ${data.removed} contact${data.removed === 1 ? "" : "s"} from ${activeCampaignInfo.name}`
+        );
+      }
+      setSelectedIds(new Set());
+      setConfirmDelete(null);
+      // Refresh
+      const { data: refreshed } = await api.post("/people/query", filters);
+      setData(refreshed);
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Delete failed");
     }
   };
 
@@ -238,11 +340,63 @@ export default function PeoplePage() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {selectedIds.size > 0 && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    data-testid="bulk-delete-btn"
+                    className="border-red-200 text-red-700 hover:bg-red-50 hover:text-red-800"
+                  >
+                    <Trash2 className="w-4 h-4 mr-1.5" />
+                    Delete ({selectedIds.size})
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-64">
+                  {activeCampaignInfo && (
+                    <DropdownMenuItem
+                      data-testid="delete-from-campaign-only"
+                      onClick={() => setConfirmDelete("campaign")}
+                    >
+                      <div>
+                        <div className="text-sm font-medium">
+                          Remove from this campaign only
+                        </div>
+                        <div className="text-[11px] text-slate-500 mt-0.5">
+                          Contact + other campaigns stay intact
+                        </div>
+                      </div>
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuItem
+                    data-testid="delete-from-everywhere"
+                    onClick={() => setConfirmDelete("all")}
+                  >
+                    <div>
+                      <div className="text-sm font-medium text-red-700">
+                        Delete from all lists & campaigns
+                      </div>
+                      <div className="text-[11px] text-slate-500 mt-0.5">
+                        Removes the contact record entirely
+                      </div>
+                    </div>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="sm" data-testid="export-btn">
+                <Button
+                  variant={selectedIds.size > 0 ? "default" : "outline"}
+                  size="sm"
+                  data-testid="export-btn"
+                  className={selectedIds.size > 0 ? "bg-indigo-600 hover:bg-indigo-700 text-white" : ""}
+                >
                   <Download className="w-4 h-4 mr-1.5" />
-                  Export
+                  {selectedIds.size > 0
+                    ? `Export ${selectedIds.size} selected`
+                    : "Export"}
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
@@ -457,6 +611,44 @@ export default function PeoplePage() {
         </div>
       </div>
 
+      {/* Company context banner (with editable notes) */}
+      {activeCompany && (
+        <div className="border-b border-slate-200 bg-indigo-50/40 px-6 py-3">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <div className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold">
+                Company overview
+              </div>
+              <div className="text-lg font-semibold text-slate-900 mt-0.5">
+                {activeCompany.name}
+              </div>
+              {activeCompany.email_domain && (
+                <div className="text-mono text-[12px] text-slate-500">
+                  @{activeCompany.email_domain}
+                </div>
+              )}
+            </div>
+            <div className="w-full sm:w-96 shrink-0">
+              <div className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold mb-1">
+                Company notes
+              </div>
+              <div className="bg-white border border-slate-200 rounded-md p-2 min-h-[40px]">
+                <NotesCell
+                  entity="company"
+                  id={activeCompany.id}
+                  initialNotes={activeCompany.notes}
+                  compact={false}
+                  testId="company-notes"
+                  onSaved={(newNotes) =>
+                    setActiveCompany((c) => (c ? { ...c, notes: newNotes } : c))
+                  }
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Table */}
       <div className="flex-1 overflow-auto">
         {loading && data.items.length === 0 ? (
@@ -469,18 +661,34 @@ export default function PeoplePage() {
           <table className="w-full text-sm" data-testid="people-table">
             <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500 sticky top-0 z-10">
               <tr>
-                <th className="px-4 py-2.5 text-left font-semibold">Name</th>
+                <th className="px-4 py-2.5 w-8">
+                  <input
+                    type="checkbox"
+                    className="rounded accent-indigo-600 cursor-pointer"
+                    checked={allVisibleSelected}
+                    onChange={toggleSelectAllVisible}
+                    data-testid="select-all-checkbox"
+                  />
+                </th>
+                <th className="px-3 py-2.5 text-left font-semibold">Name</th>
                 <th className="px-3 py-2.5 text-left font-semibold">Company</th>
                 <th className="px-3 py-2.5 text-left font-semibold">Title</th>
                 <th className="px-3 py-2.5 text-left font-semibold">Email</th>
                 <th className="px-3 py-2.5 text-left font-semibold">Phone</th>
                 <th className="px-3 py-2.5 text-left font-semibold w-8">LI</th>
                 <th className="px-3 py-2.5 text-left font-semibold">Campaigns</th>
+                <th className="px-3 py-2.5 text-left font-semibold w-[220px]">Notes</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {data.items.map((p) => (
-                <PersonRow key={p.id} person={p} />
+                <PersonRow
+                  key={p.id}
+                  person={p}
+                  selected={selectedIds.has(p.id)}
+                  onToggleSelect={() => toggleSelect(p.id)}
+                  onNotesSaved={(n) => updateRowNotes(p.id, n)}
+                />
               ))}
             </tbody>
           </table>
@@ -522,18 +730,71 @@ export default function PeoplePage() {
           </div>
         </div>
       )}
+
+      {/* Bulk delete confirmation */}
+      <Dialog open={!!confirmDelete} onOpenChange={(o) => !o && setConfirmDelete(null)}>
+        <DialogContent data-testid="confirm-delete-dialog">
+          <DialogHeader>
+            <DialogTitle>
+              {confirmDelete === "all"
+                ? `Delete ${selectedIds.size} contact${selectedIds.size === 1 ? "" : "s"}?`
+                : `Remove ${selectedIds.size} contact${selectedIds.size === 1 ? "" : "s"} from ${activeCampaignInfo?.name}?`}
+            </DialogTitle>
+            <DialogDescription>
+              {confirmDelete === "all" ? (
+                <>
+                  These contacts will be permanently removed from every campaign, every
+                  list, and the People directory. This cannot be undone.
+                </>
+              ) : (
+                <>
+                  The contacts stay in your directory and in any other campaigns they
+                  belong to — they&apos;ll just be removed from{" "}
+                  <span className="font-medium">{activeCampaignInfo?.name}</span>.
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmDelete(null)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={() => runBulkDelete(confirmDelete)}
+              className={
+                confirmDelete === "all"
+                  ? "bg-red-600 hover:bg-red-700 text-white"
+                  : "bg-indigo-600 hover:bg-indigo-700 text-white"
+              }
+              data-testid="confirm-delete-btn"
+            >
+              <Trash2 className="w-3.5 h-3.5 mr-1.5" />
+              {confirmDelete === "all" ? "Delete permanently" : "Remove from campaign"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
 
-function PersonRow({ person }) {
+function PersonRow({ person, selected, onToggleSelect, onNotesSaved }) {
   return (
     <tr
-      className="row-hover cursor-pointer"
+      className={`row-hover cursor-pointer ${selected ? "bg-indigo-50/40" : ""}`}
       data-testid={`person-row-${person.id}`}
       onClick={() => openPerson(person.id)}
     >
-      <td className="px-4 py-2.5 min-w-[180px]">
+      <td className="px-4 py-2.5 w-8" onClick={(e) => e.stopPropagation()}>
+        <input
+          type="checkbox"
+          className="rounded accent-indigo-600 cursor-pointer"
+          checked={!!selected}
+          onChange={onToggleSelect}
+          data-testid={`select-person-${person.id}`}
+        />
+      </td>
+      <td className="px-3 py-2.5 min-w-[180px]">
         <div className="font-medium text-slate-900 truncate max-w-[220px]">{person.full_name}</div>
       </td>
       <td className="px-3 py-2.5 text-slate-700 truncate max-w-[160px]">
@@ -605,6 +866,15 @@ function PersonRow({ person }) {
             </Popover>
           )}
         </div>
+      </td>
+      <td className="px-3 py-2.5 max-w-[220px] align-top" onClick={(e) => e.stopPropagation()}>
+        <NotesCell
+          entity="person"
+          id={person.id}
+          initialNotes={person.notes}
+          onSaved={onNotesSaved}
+          testId={`notes-${person.id}`}
+        />
       </td>
     </tr>
   );

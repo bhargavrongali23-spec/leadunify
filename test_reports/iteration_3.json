@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration-3 verification of LeadUnify new features (notes columns, fuzzy company merge, bulk select/export/delete, scalability, route ordering). 9/11 new backend pytest cases pass. All frontend testids for the new UI are present and wired: select-all-checkbox, select-person-*, notes-* (with popover textarea + save), bulk-delete-btn (appears on selection), Export button changes to 'Export N selected', company-notes banner appears on ?company=X, delete-from-campaign-only + delete-from-everywhere both appear only when a campaign filter is active. Seed baseline restored to 20 people / 17 companies / 7 campaigns / 38 links after cleanup. Bhargav regression still passes (1 person, 2 campaigns). Two backend test failures uncovered a real inconsistency in normalize_company_name for the 'A and D Mortgage' case — see rca.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "dedup.normalize_company_name", "issue": "'A and D Mortgage LLC' canonicalizes to 'a and d' (not 'a and d mortgage' as review request states). Root cause: _TRAILING_INDUSTRY_TOKENS contains 'mortgage', so it is stripped as a trailing industry word — same rule that lets 'Texas Bank Financial' collapse to 'texas bank'. The two examples in the spec are mutually inconsistent."},
+      {"endpoint": "/api/companies", "issue": "No DELETE endpoint for a company — merge is the only removal path. Made test-data cleanup awkward (had to merge TEST companies into HDFC)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Companies page (baseline / no dupes)", "issues": ["merge-candidates-section is not rendered at all when there are no duplicate groups — this is fine, but there's no empty-state message either. Consider a subtle 'No duplicate companies detected' pill so admins know the check ran."]},
+      {"screen": "Campaigns list", "issues": ["Nested <button> hydration warning still present from iteration_2 (CampaignChip inside campaign-card <button>). Not user-visible, still a console warning."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_leadunify_iter3.py",
+    "/app/backend/tests/test_leadunify_backend.py",
+    "/app/test_reports/pytest/iter3_results.xml"
+  ],
+  "action_items": [
+    "Decide semantics for normalize_company_name: either remove 'mortgage' from _TRAILING_INDUSTRY_TOKENS (matches 'A and D Mortgage' example) OR update the review-request example. Currently 'a and d mortgage' collapses to 'a and d' which could over-merge unrelated companies like 'A and D Mortgage' vs 'A and D Insurance'.",
+    "Optional: add an empty-state hint on Companies page when merge-candidates returns [].",
+    "Optional: add DELETE /api/companies/{id} for orphan/test cleanup (currently merge is the only path)."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 1600+ lines — split into routers.",
+    "_STAGED import token map is in-process; a backend restart drops mid-import sessions.",
+    "canonical_name backfill runs on every startup — fine for small datasets, but wrap in a one-time flag once row count grows.",
+    "normalize_company_name trailing-industry-token stripping is aggressive: 'Mortgage', 'Capital', 'Partners', 'Solutions', 'Services' as sole distinguishing words will over-collapse. Consider making stripping only apply when preceding tokens are >=2."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_leadunify_iter3.py (new — iteration-3 feature coverage)"
+  ],
+  "success_rate": {"backend": "82% (9/11 new + 100% regression from iter2)", "frontend": "100% (all iter3 testids/flows verified)"},
+  "test_credentials": "admin@leadunify.com / admin123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Bulk-ops test created a temp campaign 'TEST_bulk_<ts>' + 2 people (test_bulka_@example.com, test_bulkb_@example.com) then cleaned them up via /api/people/bulk-delete + DELETE /api/campaigns/{id}. Company-merge test PATCHed 3 seed people to TEST_Texas Bank* names — because get_or_create_company auto-merges by canonical, only 1 TEST_Texas Bank Ltd company was created (not 3), and merge-candidates therefore returned []. Post-test cleanup: restored people's original company_name AND merged the leftover TEST_Texas Bank Ltd + Example (orphan from iter2 test with @example.com domain) into HDFC Bank via /api/companies/merge to restore 17-company baseline. Final DB state verified: 20 people / 17 companies / 7 campaigns / 38 person_campaigns. Import batches count is now 2 (seed 1 + iter3 bulk test 1) — no functional impact but not exactly 1 as spec states; consider batch cleanup or accept.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "iter3 test file: /app/backend/tests/test_leadunify_iter3.py. Two known-failing tests are DESIGN issues, not code bugs: (1) test_normalizes_variants asserts the review-request behavior which contradicts the 'Texas Bank Financial'->'texas bank' behavior on the same normalization rules. (2) test_insert_dupes_group_and_merge cannot create 3 sibling companies through the public API because get_or_create_company auto-merges them by canonical_name — which is the fuzzy-matching feature working AS DESIGNED. To test the merge-candidates endpoint end-to-end, either add a company POST endpoint or use direct MongoDB insertion. Run with: REACT_APP_BACKEND_URL=<url> python -m pytest backend/tests/test_leadunify_iter3.py -v",
+  "rca of the issue": "normalize_company_name('A and D Mortgage LLC') returning 'a and d' (not 'a and d mortgage'): the corporate-suffix pass strips 'LLC' leaving 'a and d mortgage', then the trailing-industry-token pass sees 'mortgage' in _TRAILING_INDUSTRY_TOKENS and strips it too, yielding 'a and d'. Both 'A & D Mortgage, Inc.' and 'A and D Mortgage LLC' collapse consistently — but to 'a and d', NOT 'a and d mortgage' as the review request asserts. Mitigation options: (a) remove 'mortgage', 'mortgages' from _TRAILING_INDUSTRY_TOKENS (safest — 'mortgage' is often the distinguishing word), (b) only strip when >=3 preceding tokens remain, or (c) accept and update the spec example. The other trailing tokens (Financial/Capital/Partners/Solutions) are safer to strip because they rarely encode the core identity, but 'Mortgage' typically does."
+}

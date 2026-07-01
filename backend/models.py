@@ -89,6 +89,8 @@ class LoginInput(BaseModel):
 class Company(BaseDocument):
     name: str
     email_domain: Optional[str] = None
+    canonical_name: Optional[str] = None  # normalized for fuzzy matching
+    notes: Optional[str] = None
     created_at: str = Field(default_factory=utc_now_iso)
 
 
