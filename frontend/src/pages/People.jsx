@@ -1,0 +1,571 @@
+import { useMemo, useEffect, useState } from "react";
+import { api } from "@/lib/api";
+import { openPerson } from "@/components/AppLayout";
+import { CampaignChip } from "@/components/CampaignChip";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Search,
+  Linkedin,
+  Filter,
+  Download,
+  ChevronLeft,
+  ChevronRight,
+  X,
+  Users as UsersIcon,
+  Loader2,
+  Save,
+  Upload,
+} from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { toast } from "sonner";
+
+export default function PeoplePage() {
+  const navigate = useNavigate();
+  const [search, setSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const [campaigns, setCampaigns] = useState([]);
+  const [inCampaigns, setInCampaigns] = useState([]);
+  const [notInCampaigns, setNotInCampaigns] = useState([]);
+  const [companyFilter, setCompanyFilter] = useState("");
+  const [page, setPage] = useState(1);
+  const pageSize = 25;
+  const [data, setData] = useState({ items: [], total: 0 });
+  const [loading, setLoading] = useState(false);
+  const [savedFilters, setSavedFilters] = useState([]);
+  const [saveName, setSaveName] = useState("");
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(search), 250);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await api.get("/campaigns");
+        setCampaigns(data.items || []);
+      } catch (_e) {
+        /* ignore */
+      }
+    })();
+    (async () => {
+      try {
+        const { data } = await api.get("/saved-filters");
+        setSavedFilters(data.items || []);
+      } catch (_e) {
+        /* ignore */
+      }
+    })();
+  }, []);
+
+  const filters = useMemo(
+    () => ({
+      search: debounced || null,
+      company_name: companyFilter || null,
+      in_campaigns: inCampaigns.length ? inCampaigns : null,
+      not_in_campaigns: notInCampaigns.length ? notInCampaigns : null,
+      page,
+      page_size: pageSize,
+    }),
+    [debounced, companyFilter, inCampaigns, notInCampaigns, page]
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api
+      .post("/people/query", filters)
+      .then(({ data }) => {
+        if (!cancelled) setData(data);
+      })
+      .catch(() => {})
+      .finally(() => !cancelled && setLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [filters]);
+
+  const totalPages = Math.max(1, Math.ceil((data.total || 0) / pageSize));
+
+  const exportCsv = async (format) => {
+    try {
+      const response = await api.post(
+        `/people/export?format=${format}`,
+        filters,
+        { responseType: "blob" }
+      );
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = format === "xlsx" ? "people_export.xlsx" : "people_export.csv";
+      a.click();
+      window.URL.revokeObjectURL(url);
+      toast.success("Export downloaded");
+    } catch (e) {
+      toast.error("Export failed");
+    }
+  };
+
+  const activeFilterCount =
+    (inCampaigns.length ? 1 : 0) +
+    (notInCampaigns.length ? 1 : 0) +
+    (companyFilter ? 1 : 0);
+
+  const clearFilters = () => {
+    setInCampaigns([]);
+    setNotInCampaigns([]);
+    setCompanyFilter("");
+    setPage(1);
+  };
+
+  const saveCurrent = async () => {
+    if (!saveName.trim()) {
+      toast.error("Give your filter a name");
+      return;
+    }
+    try {
+      const { data } = await api.post("/saved-filters", {
+        name: saveName.trim(),
+        filters: {
+          search: debounced,
+          company_name: companyFilter,
+          in_campaigns: inCampaigns,
+          not_in_campaigns: notInCampaigns,
+        },
+      });
+      setSavedFilters((prev) => [data, ...prev]);
+      setSaveName("");
+      toast.success("Saved");
+    } catch (_) {
+      toast.error("Could not save");
+    }
+  };
+
+  const applySaved = (f) => {
+    setSearch(f.filters?.search || "");
+    setCompanyFilter(f.filters?.company_name || "");
+    setInCampaigns(f.filters?.in_campaigns || []);
+    setNotInCampaigns(f.filters?.not_in_campaigns || []);
+    setPage(1);
+  };
+
+  const deleteSaved = async (id) => {
+    await api.delete(`/saved-filters/${id}`);
+    setSavedFilters((prev) => prev.filter((s) => s.id !== id));
+  };
+
+  return (
+    <div className="h-full flex flex-col" data-testid="people-page">
+      {/* Header */}
+      <div className="border-b border-slate-200 bg-white px-6 py-4">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <h1 className="text-xl font-bold tracking-tight text-slate-900">People Directory</h1>
+            <p className="text-xs text-slate-500 mt-0.5">
+              {loading ? "Loading…" : `${data.total.toLocaleString()} unique people`}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="sm" data-testid="export-btn">
+                  <Download className="w-4 h-4 mr-1.5" />
+                  Export
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem data-testid="export-csv" onClick={() => exportCsv("csv")}>
+                  Export as CSV
+                </DropdownMenuItem>
+                <DropdownMenuItem data-testid="export-xlsx" onClick={() => exportCsv("xlsx")}>
+                  Export as XLSX
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <Button
+              size="sm"
+              data-testid="goto-import-btn"
+              className="bg-indigo-600 hover:bg-indigo-700 text-white"
+              onClick={() => navigate("/import")}
+            >
+              <Upload className="w-4 h-4 mr-1.5" />
+              Import
+            </Button>
+          </div>
+        </div>
+
+        {/* Filter row */}
+        <div className="mt-4 flex items-center gap-2 flex-wrap">
+          <div className="relative flex-1 min-w-[280px] max-w-xl">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            <Input
+              value={search}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setPage(1);
+              }}
+              placeholder="Search name, email, company, title…"
+              data-testid="search-input"
+              className="pl-9 text-mono h-9"
+            />
+          </div>
+
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button variant="outline" size="sm" data-testid="filter-in-campaign-btn">
+                <Filter className="w-4 h-4 mr-1.5" />
+                In campaign
+                {inCampaigns.length > 0 && (
+                  <span className="ml-1.5 chip chip-active !py-0 !px-1.5 !text-[10px]">
+                    {inCampaigns.length}
+                  </span>
+                )}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="p-2 w-72">
+              <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide px-2 py-1">
+                Person IS in
+              </div>
+              <div className="max-h-64 overflow-y-auto">
+                {campaigns.map((c) => (
+                  <label
+                    key={c.id}
+                    className="flex items-center gap-2 px-2 py-1.5 hover:bg-slate-50 rounded cursor-pointer text-sm"
+                  >
+                    <input
+                      type="checkbox"
+                      data-testid={`filter-in-${c.id}`}
+                      className="rounded accent-indigo-600"
+                      checked={inCampaigns.includes(c.id)}
+                      onChange={(e) => {
+                        setPage(1);
+                        setInCampaigns((prev) =>
+                          e.target.checked ? [...prev, c.id] : prev.filter((x) => x !== c.id)
+                        );
+                      }}
+                    />
+                    <span className="flex-1 truncate">{c.name}</span>
+                    <span className="text-[10px] text-slate-400 text-mono">
+                      {c.people_count || 0}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </PopoverContent>
+          </Popover>
+
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button variant="outline" size="sm" data-testid="filter-not-in-campaign-btn">
+                <X className="w-4 h-4 mr-1.5 text-amber-500" />
+                Not in campaign
+                {notInCampaigns.length > 0 && (
+                  <span className="ml-1.5 chip chip-duplicate !py-0 !px-1.5 !text-[10px]">
+                    {notInCampaigns.length}
+                  </span>
+                )}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="p-2 w-72">
+              <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide px-2 py-1">
+                Person is NOT in
+              </div>
+              <div className="max-h-64 overflow-y-auto">
+                {campaigns.map((c) => (
+                  <label
+                    key={c.id}
+                    className="flex items-center gap-2 px-2 py-1.5 hover:bg-slate-50 rounded cursor-pointer text-sm"
+                  >
+                    <input
+                      type="checkbox"
+                      data-testid={`filter-notin-${c.id}`}
+                      className="rounded accent-amber-500"
+                      checked={notInCampaigns.includes(c.id)}
+                      onChange={(e) => {
+                        setPage(1);
+                        setNotInCampaigns((prev) =>
+                          e.target.checked ? [...prev, c.id] : prev.filter((x) => x !== c.id)
+                        );
+                      }}
+                    />
+                    <span className="flex-1 truncate">{c.name}</span>
+                  </label>
+                ))}
+              </div>
+            </PopoverContent>
+          </Popover>
+
+          <Input
+            placeholder="Company"
+            value={companyFilter}
+            data-testid="filter-company-input"
+            onChange={(e) => {
+              setCompanyFilter(e.target.value);
+              setPage(1);
+            }}
+            className="h-9 max-w-[180px]"
+          />
+
+          {activeFilterCount > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={clearFilters}
+              data-testid="clear-filters-btn"
+              className="text-slate-500"
+            >
+              Clear filters
+            </Button>
+          )}
+
+          <div className="flex-1" />
+
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button variant="ghost" size="sm" data-testid="saved-filters-btn">
+                <Save className="w-4 h-4 mr-1.5" />
+                Saved
+                {savedFilters.length > 0 && (
+                  <span className="ml-1.5 text-[10px] text-slate-500 text-mono">
+                    {savedFilters.length}
+                  </span>
+                )}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="p-3 w-80">
+              <div className="flex gap-2 mb-3">
+                <Input
+                  value={saveName}
+                  onChange={(e) => setSaveName(e.target.value)}
+                  placeholder="Name this filter"
+                  className="h-8 text-sm"
+                  data-testid="save-filter-name-input"
+                />
+                <Button
+                  size="sm"
+                  onClick={saveCurrent}
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white h-8"
+                  data-testid="save-filter-btn"
+                >
+                  Save
+                </Button>
+              </div>
+              <div className="max-h-64 overflow-y-auto -mx-1">
+                {savedFilters.length === 0 ? (
+                  <div className="text-xs text-slate-400 px-1 py-2">
+                    Save the current filter combination to reuse later.
+                  </div>
+                ) : (
+                  savedFilters.map((s) => (
+                    <div
+                      key={s.id}
+                      className="flex items-center gap-2 px-2 py-1.5 hover:bg-slate-50 rounded text-sm"
+                    >
+                      <button
+                        type="button"
+                        className="flex-1 text-left truncate text-slate-700 hover:text-indigo-700"
+                        onClick={() => applySaved(s)}
+                        data-testid={`apply-saved-${s.id}`}
+                      >
+                        {s.name}
+                      </button>
+                      <button
+                        type="button"
+                        className="text-slate-300 hover:text-red-500"
+                        onClick={() => deleteSaved(s.id)}
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </PopoverContent>
+          </Popover>
+        </div>
+      </div>
+
+      {/* Table */}
+      <div className="flex-1 overflow-auto">
+        {loading && data.items.length === 0 ? (
+          <div className="h-full flex items-center justify-center text-slate-400">
+            <Loader2 className="w-5 h-5 animate-spin mr-2" /> Loading people…
+          </div>
+        ) : data.items.length === 0 ? (
+          <EmptyState onImport={() => navigate("/import")} />
+        ) : (
+          <table className="w-full text-sm" data-testid="people-table">
+            <thead className="bg-slate-50 text-[11px] uppercase tracking-wide text-slate-500 sticky top-0 z-10">
+              <tr>
+                <th className="px-4 py-2.5 text-left font-semibold">Name</th>
+                <th className="px-3 py-2.5 text-left font-semibold">Company</th>
+                <th className="px-3 py-2.5 text-left font-semibold">Title</th>
+                <th className="px-3 py-2.5 text-left font-semibold">Email</th>
+                <th className="px-3 py-2.5 text-left font-semibold">Phone</th>
+                <th className="px-3 py-2.5 text-left font-semibold w-8">LI</th>
+                <th className="px-3 py-2.5 text-left font-semibold">Campaigns</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {data.items.map((p) => (
+                <PersonRow key={p.id} person={p} />
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Pagination */}
+      {data.total > 0 && (
+        <div className="border-t border-slate-200 bg-white px-4 py-2.5 flex items-center justify-between text-xs text-slate-500">
+          <div>
+            Showing{" "}
+            <span className="text-mono text-slate-700">
+              {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, data.total)}
+            </span>{" "}
+            of <span className="text-mono text-slate-700">{data.total.toLocaleString()}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              data-testid="prev-page-btn"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </Button>
+            <div className="text-mono text-slate-600">
+              {page} / {totalPages}
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={page >= totalPages}
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              data-testid="next-page-btn"
+            >
+              <ChevronRight className="w-4 h-4" />
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PersonRow({ person }) {
+  return (
+    <tr
+      className="row-hover cursor-pointer"
+      data-testid={`person-row-${person.id}`}
+      onClick={() => openPerson(person.id)}
+    >
+      <td className="px-4 py-2.5 min-w-[180px]">
+        <div className="font-medium text-slate-900 truncate max-w-[220px]">{person.full_name}</div>
+      </td>
+      <td className="px-3 py-2.5 text-slate-700 truncate max-w-[160px]">
+        {person.company_name || <span className="text-slate-300">—</span>}
+      </td>
+      <td className="px-3 py-2.5 text-slate-500 truncate max-w-[180px]">
+        {person.job_title || <span className="text-slate-300">—</span>}
+      </td>
+      <td className="px-3 py-2.5 text-mono text-[12.5px] text-slate-600 truncate max-w-[220px]">
+        {person.primary_email}
+      </td>
+      <td className="px-3 py-2.5 text-mono text-[12px] text-slate-600 whitespace-nowrap">
+        {(person.phones || [])[0] || <span className="text-slate-300">—</span>}
+      </td>
+      <td className="px-3 py-2.5">
+        {person.linkedin_url ? (
+          <a
+            href={person.linkedin_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            data-testid={`linkedin-link-${person.id}`}
+            className="text-slate-400 hover:text-indigo-600"
+          >
+            <Linkedin className="w-4 h-4" />
+          </a>
+        ) : (
+          <span className="text-slate-200">
+            <Linkedin className="w-4 h-4" />
+          </span>
+        )}
+      </td>
+      <td className="px-3 py-2.5">
+        <div className="flex flex-wrap items-center gap-1 max-w-[280px]">
+          {(person.campaigns || []).slice(0, 2).map((c) => (
+            <CampaignChip
+              key={c.id}
+              name={c.name}
+              status={c.status}
+              testId={`chip-${person.id}-${c.id}`}
+              onClick={(e) => {
+                e.stopPropagation();
+              }}
+            />
+          ))}
+          {(person.campaigns || []).length > 2 && (
+            <Popover>
+              <PopoverTrigger asChild>
+                <button
+                  onClick={(e) => e.stopPropagation()}
+                  className="chip chip-completed"
+                  data-testid={`more-chips-${person.id}`}
+                >
+                  +{person.campaigns.length - 2} more
+                </button>
+              </PopoverTrigger>
+              <PopoverContent align="end" className="p-2 w-64">
+                <div className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide px-1 py-1">
+                  All campaigns
+                </div>
+                <div className="space-y-1">
+                  {person.campaigns.map((c) => (
+                    <div key={c.id} className="flex items-center">
+                      <CampaignChip name={c.name} status={c.status} />
+                    </div>
+                  ))}
+                </div>
+              </PopoverContent>
+            </Popover>
+          )}
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+function EmptyState({ onImport }) {
+  return (
+    <div className="h-full flex items-center justify-center p-8">
+      <div className="max-w-md text-center">
+        <div className="w-14 h-14 rounded-full bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center mx-auto">
+          <UsersIcon className="w-6 h-6" strokeWidth={2} />
+        </div>
+        <h2 className="mt-4 text-lg font-semibold text-slate-900">No people match your filters</h2>
+        <p className="mt-1 text-sm text-slate-500">
+          Try clearing filters, or import a new sheet to grow the directory.
+        </p>
+        <Button
+          onClick={onImport}
+          className="mt-4 bg-indigo-600 hover:bg-indigo-700 text-white"
+          data-testid="empty-import-btn"
+        >
+          <Upload className="w-4 h-4 mr-1.5" />
+          Import a sheet
+        </Button>
+      </div>
+    </div>
+  );
+}
