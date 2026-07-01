@@ -1,0 +1,34 @@
+{
+  "summary": "Iter6 full QA pass — (1) BUG FIX verified: /team Reset password now uses a Dialog (opened via data-testid=reset-pwd-<id>, generated 12-char password, confirmed via reset-password-confirm) and login with the new password succeeded (200). Delete user Dialog also opened via data-testid=delete-user-dialog / delete-user-confirm. (2) NEW: /api/people/{id}/flag-enrichment + unflag-enrichment + needs_enrichment filter — 5/5 backend tests pass, UI chip filter-needs-enrichment turns amber on click, enrichment-block visible in Person Detail. (3) NEW: audit log — merge_people and merge_companies both write to /api/audit-log (kept_id/kept_name/merged_name/people_moved present), ?action filter works, non-admin gets 403, unauth gets 401/403. /team Audit-log tab renders (0 rows when empty). Backend pytest: 16/16 passed. Baseline restored EXACTLY to 20 people / 17 companies / 7 campaigns / 38 person_campaigns / 1 admin user / 0 access_requests / 0 audit_log entries.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_leadunify_iter6.py",
+    "/app/test_reports/pytest/iter6_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is now ~2103 lines — carried-over feedback from iter5; strongly recommend splitting into routers (people.py, campaigns.py, team.py, audit.py, imports.py) before adding more features.",
+    "_log_audit does not include a schema/version field on the audit doc — if the shape of `detail` evolves you have no way to migrate/filter old rows. Consider adding `version: 1`.",
+    "GET /api/audit-log has no cursor/offset pagination, only `limit` (max 500). Fine for MVP but will need `before_id` or created_at cursor when volume grows.",
+    "POST /api/people/{id}/flag-enrichment does not require admin — any authenticated user can flag. That may be intentional (team-wide feature) but should be documented.",
+    "Frontend `page.request.post(/auth/login)` during Playwright testing overwrites the admin httpOnly cookie for the same origin — testing artifact only, not a product bug. Documented in context_for_next_testing_agent.",
+    "Team.jsx invite dialog button label is 'Invite' (not 'Send invite') — matches earlier version; script fixed to use data-testid path via `[data-testid=invite-dialog] button:has-text(Invite)` for reliability."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_leadunify_iter6.py (NEW — 16 tests: enrichment flag, merge audit-log, audit access-control, reset-password regression, baseline)",
+    "/app/test_reports/pytest/iter6_results.xml (junit)",
+    "/app/test_reports/iteration_6.json (this report)"
+  ],
+  "success_rate": { "backend": "100% (16/16)", "frontend": "100% for the two bug-fix Dialogs (reset-password + delete-user), enrichment chip amber-fill, audit-log tab render; sidebar nav to /companies /campaigns /import /duplicates /dashboard all load without console errors" },
+  "test_credentials": "admin@leadunify.com / admin123 (verified against /app/memory/test_credentials.md)",
+  "seed_data_creation": "During pytest run: pymongo-inserted 2 TEST_Sarah people + 2 TEST_Co companies + 2 TEST_CoPerson people + 3 invited members (aud_/rp_/tmp_ + uitest_ via UI). All cleaned up post-test. Final DB state verified: 20/17/7/38/1/0/0 (people/companies/campaigns/person_campaigns/users/access_requests/audit_log).",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "iter6 test file: /app/backend/tests/test_leadunify_iter6.py — 16 tests in 5 classes; note that pytest.ini forces `-n 2 --dist loadscope`, and TestFinalBaseline explicitly polls stats + purges TEST_ leftovers before asserting baseline (needed because merge tests on gw1 finish after enrichment tests on gw0). Playwright reset-password verification: use `[data-testid=reset-pwd-<uid>]`, then `[data-testid=reset-password-dialog]` -> `reset-password-generate` -> read `reset-password-input` value -> `reset-password-confirm`. To verify login with new pw, use `page.request.post` — but be aware it OVERWRITES the current httpOnly session cookie for the origin (which will make subsequent frontend admin actions 403). To avoid this: (a) do the login verification LAST, or (b) use a fresh browser context, or (c) verify via urllib in a separate process. UI enrichment-block only appears on Person Detail when person has no linkedin_url AND no phones. Only ~4-5 of 20 seed people qualify.",
+  "rca of the issue": "N/A — no product bugs found. The iter5 user-reported bug (Reset password button is a no-op because it used window.prompt) is confirmed FIXED: /team now uses a proper Radix Dialog with data-testid=reset-password-dialog. Verified end-to-end: dialog opens, Generate produces a 12-char password, Confirm calls PATCH /users/{id} and the invited user can subsequently log in with the new password (HTTP 200)."
+}

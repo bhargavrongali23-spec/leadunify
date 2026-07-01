@@ -25,6 +25,7 @@ import {
   Save,
   Upload,
   Trash2,
+  Flag,
 } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
@@ -50,6 +51,9 @@ export default function PeoplePage() {
     searchParams.get("notIn") ? [searchParams.get("notIn")] : []
   );
   const [companyFilter, setCompanyFilter] = useState(searchParams.get("company") || "");
+  const [needsEnrichment, setNeedsEnrichment] = useState(
+    searchParams.get("needs_enrichment") === "1"
+  );
   const [page, setPage] = useState(1);
   const pageSize = 25;
   const [data, setData] = useState({ items: [], total: 0 });
@@ -119,10 +123,11 @@ export default function PeoplePage() {
       company_name: companyFilter || null,
       in_campaigns: inCampaigns.length ? inCampaigns : null,
       not_in_campaigns: notInCampaigns.length ? notInCampaigns : null,
+      needs_enrichment: needsEnrichment || null,
       page,
       page_size: pageSize,
     }),
-    [debounced, companyFilter, inCampaigns, notInCampaigns, page]
+    [debounced, companyFilter, inCampaigns, notInCampaigns, needsEnrichment, page]
   );
 
   useEffect(() => {
@@ -532,6 +537,20 @@ export default function PeoplePage() {
             className="h-9 max-w-[180px]"
           />
 
+          <Button
+            variant={needsEnrichment ? "default" : "outline"}
+            size="sm"
+            onClick={() => {
+              setNeedsEnrichment((v) => !v);
+              setPage(1);
+            }}
+            data-testid="filter-needs-enrichment"
+            className={needsEnrichment ? "bg-amber-500 hover:bg-amber-600 text-white border-amber-500" : ""}
+          >
+            <Flag className="w-3.5 h-3.5 mr-1.5" />
+            Needs enrichment
+          </Button>
+
           {activeFilterCount > 0 && (
             <Button
               variant="ghost"
@@ -810,22 +829,33 @@ function PersonRow({ person, selected, onToggleSelect, onNotesSaved }) {
         {(person.phones || [])[0] || <span className="text-slate-300">—</span>}
       </td>
       <td className="px-3 py-2.5">
-        {person.linkedin_url ? (
-          <a
-            href={person.linkedin_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={(e) => e.stopPropagation()}
-            data-testid={`linkedin-link-${person.id}`}
-            className="text-slate-400 hover:text-indigo-600"
-          >
-            <Linkedin className="w-4 h-4" />
-          </a>
-        ) : (
-          <span className="text-slate-200">
-            <Linkedin className="w-4 h-4" />
-          </span>
-        )}
+        <div className="flex items-center gap-1.5">
+          {person.linkedin_url ? (
+            <a
+              href={person.linkedin_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              data-testid={`linkedin-link-${person.id}`}
+              className="text-slate-400 hover:text-indigo-600"
+            >
+              <Linkedin className="w-4 h-4" />
+            </a>
+          ) : (
+            <span className="text-slate-200">
+              <Linkedin className="w-4 h-4" />
+            </span>
+          )}
+          {person.enrichment_flag && (
+            <span
+              data-testid={`enrichment-flag-${person.id}`}
+              className="text-amber-500"
+              title="Flagged for enrichment"
+            >
+              <Flag className="w-3.5 h-3.5" />
+            </span>
+          )}
+        </div>
       </td>
       <td className="px-3 py-2.5">
         <div className="flex flex-wrap items-center gap-1 max-w-[280px]">

@@ -123,6 +123,9 @@ class Person(BaseDocument):
     job_title: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
     notes: Optional[str] = None
+    enrichment_flag: bool = False  # queued for future Lusha / LinkedIn enrichment
+    enrichment_flagged_at: Optional[str] = None
+    enrichment_flagged_by: Optional[str] = None
     sources: List[SourceEntry] = Field(default_factory=list)
     conflicts: List[FieldConflict] = Field(default_factory=list)
     created_at: str = Field(default_factory=utc_now_iso)

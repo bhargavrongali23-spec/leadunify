@@ -159,6 +159,18 @@ def _user_public(u: dict) -> dict:
     }
 
 
+async def _log_audit(user: dict, action: str, detail: dict) -> None:
+    """Append an audit-log entry (merges, deletes, invites)."""
+    await db.audit_log.insert_one({
+        "action": action,
+        "performed_by_id": str(user["_id"]),
+        "performed_by_email": user.get("email"),
+        "performed_by_name": user.get("name", "User"),
+        "detail": detail,
+        "created_at": utc_now_iso(),
+    })
+
+
 # ---------------------------------------------------------------------------
 # Startup — indexes, admin seed, demo data
 # ---------------------------------------------------------------------------
@@ -191,6 +203,9 @@ async def _startup() -> None:
     await db.access_requests.create_index("campaign_id")
     await db.campaigns.create_index("owner_id")
     await db.campaigns.create_index("shared_with_user_ids")
+    await db.audit_log.create_index([("created_at", -1)])
+    await db.audit_log.create_index("action")
+    await db.people.create_index("enrichment_flag")
 
     # seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@vaultedge.com").lower()
@@ -437,6 +452,12 @@ async def merge_companies(payload: CompanyMergeInput, user: dict = Depends(get_c
     await db.companies.delete_many(
         {"_id": {"$in": [ObjectId(m) for m in merged_ids if ObjectId.is_valid(m)]}}
     )
+    await _log_audit(user, "merge_companies", {
+        "kept_id": keep_id,
+        "kept_name": keep.get("name"),
+        "merged_ids": merged_ids,
+        "people_moved": moved,
+    })
     return {"ok": True, "moved": moved, "deleted": len(merged_ids)}
 
 
@@ -683,6 +704,9 @@ async def _build_people_query(filters: dict) -> dict:
     if filters.get("created_after"):
         ands.append({"created_at": {"$gte": filters["created_after"]}})
 
+    if filters.get("needs_enrichment"):
+        ands.append({"enrichment_flag": True})
+
     if ands:
         q["$and"] = ands
     return q
@@ -722,6 +746,7 @@ class PeopleQuery(BaseModel):
     in_campaigns: Optional[List[str]] = None
     not_in_campaigns: Optional[List[str]] = None
     created_after: Optional[str] = None
+    needs_enrichment: Optional[bool] = None
     page: int = 1
     page_size: int = 25
     sort_by: Optional[str] = "updated_at"
@@ -917,6 +942,14 @@ async def merge_people(payload: MergeInput, user: dict = Depends(get_current_use
             })
     await db.person_campaigns.delete_many({"person_id": payload.merge_person_id})
     await db.people.delete_one({"_id": merge_oid})
+    await _log_audit(user, "merge_people", {
+        "kept_id": payload.keep_person_id,
+        "kept_name": keep.get("full_name"),
+        "kept_email": keep.get("primary_email"),
+        "merged_id": payload.merge_person_id,
+        "merged_name": merge.get("full_name"),
+        "merged_email": merge.get("primary_email"),
+    })
     return {"ok": True}
 
 
@@ -935,6 +968,42 @@ async def delete_person(person_id: str, user: dict = Depends(get_current_user)):
 
 class BulkDeleteInput(BaseModel):
     ids: List[str]
+
+
+@api.post("/people/{person_id}/flag-enrichment")
+async def flag_person_for_enrichment(person_id: str, user: dict = Depends(get_current_user)):
+    """Queue a person for future contact-discovery enrichment (Lusha / LinkedIn
+    Sales Navigator). No external call is made yet — this is a placeholder flag
+    the team can filter on."""
+    try:
+        oid = ObjectId(person_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid person id")
+    person = await db.people.find_one({"_id": oid})
+    if not person:
+        raise HTTPException(status_code=404, detail="Person not found")
+    await db.people.update_one({"_id": oid}, {"$set": {
+        "enrichment_flag": True,
+        "enrichment_flagged_at": utc_now_iso(),
+        "enrichment_flagged_by": user["email"],
+        "updated_at": utc_now_iso(),
+    }})
+    return {"ok": True, "flagged": True}
+
+
+@api.post("/people/{person_id}/unflag-enrichment")
+async def unflag_person_for_enrichment(person_id: str, user: dict = Depends(get_current_user)):
+    try:
+        oid = ObjectId(person_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid person id")
+    await db.people.update_one({"_id": oid}, {"$set": {
+        "enrichment_flag": False,
+        "enrichment_flagged_at": None,
+        "enrichment_flagged_by": None,
+        "updated_at": utc_now_iso(),
+    }})
+    return {"ok": True, "flagged": False}
 
 
 @api.post("/people/bulk-delete")
@@ -1979,6 +2048,24 @@ async def action_access_request(
 async def my_access_requests(user: dict = Depends(get_current_user)):
     """Requests the current user has made — so they can see their pending status."""
     cursor = db.access_requests.find({"user_id": str(user["_id"])}).sort("created_at", -1).limit(50)
+    return {"items": [serialize_doc(d) async for d in cursor]}
+
+
+# ---------------------------------------------------------------------------
+# Audit log
+# ---------------------------------------------------------------------------
+@api.get("/audit-log")
+async def get_audit_log(
+    limit: int = 100,
+    action: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    _admin_only(user)
+    limit = max(1, min(limit, 500))
+    query: dict = {}
+    if action:
+        query["action"] = action
+    cursor = db.audit_log.find(query).sort("created_at", -1).limit(limit)
     return {"items": [serialize_doc(d) async for d in cursor]}
 
 

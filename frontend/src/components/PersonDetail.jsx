@@ -10,7 +10,7 @@ import {
   SelectContent,
   SelectItem,
 } from "@/components/ui/select";
-import { Loader2, Mail, Phone, Linkedin, X, Building2, Briefcase, Copy, Plus, Trash2 } from "lucide-react";
+import { Loader2, Mail, Phone, Linkedin, X, Building2, Briefcase, Copy, Plus, Trash2, Flag } from "lucide-react";
 import { toast } from "sonner";
 
 export default function PersonDetail({ personId, onClose }) {
@@ -98,6 +98,26 @@ export default function PersonDetail({ personId, onClose }) {
     navigator.clipboard.writeText(person.primary_email);
     toast.success("Email copied");
   };
+
+  const toggleEnrichmentFlag = async () => {
+    if (!person) return;
+    const endpoint = person.enrichment_flag
+      ? `/people/${personId}/unflag-enrichment`
+      : `/people/${personId}/flag-enrichment`;
+    try {
+      await api.post(endpoint);
+      toast.success(
+        person.enrichment_flag
+          ? "Unflagged"
+          : "Flagged for enrichment — will queue when Lusha / Sales Navigator is connected"
+      );
+      reload();
+    } catch (_e) {
+      toast.error("Action failed");
+    }
+  };
+
+  const missingContact = person && (!person.linkedin_url || !(person.phones || []).length);
 
   return (
     <div className="fixed inset-0 z-40" data-testid="person-detail-overlay">
@@ -194,6 +214,64 @@ export default function PersonDetail({ personId, onClose }) {
                 </div>
               )}
             </div>
+
+            {/* Enrichment flag */}
+            {(missingContact || person.enrichment_flag) && (
+              <div
+                className={`rounded-md border p-3 ${
+                  person.enrichment_flag
+                    ? "bg-amber-50 border-amber-200"
+                    : "bg-slate-50 border-slate-200"
+                }`}
+                data-testid="enrichment-block"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1.5">
+                      <Flag className="w-3 h-3" />
+                      Contact enrichment
+                    </div>
+                    <div className="text-xs text-slate-600 mt-1">
+                      {person.enrichment_flag ? (
+                        <>
+                          Queued for enrichment
+                          {person.enrichment_flagged_by && (
+                            <>
+                              {" "}by{" "}
+                              <span className="text-mono">{person.enrichment_flagged_by}</span>
+                            </>
+                          )}
+                          . Will run when Lusha / Sales Navigator is connected.
+                        </>
+                      ) : (
+                        <>
+                          {!person.linkedin_url && !(person.phones || []).length
+                            ? "No LinkedIn or phone on file. "
+                            : !person.linkedin_url
+                            ? "No LinkedIn on file. "
+                            : "No phone on file. "}
+                          Flag this contact to enrich it later.
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant={person.enrichment_flag ? "outline" : "default"}
+                    onClick={toggleEnrichmentFlag}
+                    data-testid="enrichment-toggle-btn"
+                    className={
+                      person.enrichment_flag
+                        ? ""
+                        : "bg-amber-500 hover:bg-amber-600 text-white"
+                    }
+                  >
+                    <Flag className="w-3.5 h-3.5 mr-1" />
+                    {person.enrichment_flag ? "Unflag" : "Flag for enrichment"}
+                  </Button>
+                </div>
+              </div>
+            )}
 
             {/* Campaigns */}
             <div>
