@@ -13,6 +13,7 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
 import {
@@ -99,6 +100,10 @@ export function AddColumnButton({ campaignId, onAdded }) {
       <DialogContent data-testid="add-column-dialog">
         <DialogHeader>
           <DialogTitle>Add a custom column</DialogTitle>
+          <DialogDescription>
+            Add an Excel-like tracking field just for this campaign. Column only
+            appears when this campaign is the active filter.
+          </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <div>
@@ -301,11 +306,11 @@ export function CustomColumnHeader({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Delete column &ldquo;{column.name}&rdquo;?</DialogTitle>
+            <DialogDescription>
+              All cell values under this column will be erased for every contact
+              in this campaign. This cannot be undone.
+            </DialogDescription>
           </DialogHeader>
-          <p className="text-sm text-slate-600">
-            All cell values under this column will be erased for every contact in
-            this campaign. This cannot be undone.
-          </p>
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmDel(false)}>
               Cancel

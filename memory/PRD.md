@@ -27,11 +27,37 @@ campaigns; scale target 10–50k contacts.
 - **Auth:** JWT Bearer + httpOnly cookie (both work). Token cached in
   `localStorage['leadunify_access_token']` so multipart uploads never lose auth.
 
+## Implemented (v1.1 — 2026-07-01)
+
+### Custom columns per campaign (Excel-style tracking) — NEW
+
+- Backend endpoints: `POST/GET/PATCH/DELETE /api/campaigns/{cid}/columns`,
+  `PATCH /api/campaigns/{cid}/cells/{personId}`,
+  `GET /api/campaigns/{cid}/cell-value-counts`.
+- Column kinds: `select` (Choices), `text` (Free text), `checkbox`.
+- Cell values are stored per `person_campaigns` link under `custom_values.{col_id}`
+  so a column is naturally scoped to that campaign only.
+- `/api/people/query` accepts `custom_filters: {col_id: [allowed values]}` and
+  applies filter ONLY when exactly one campaign is in `in_campaigns` (columns
+  belong to one campaign). `"__empty"` value means "cell missing/blank".
+- Deleting a column also unsets all matching `custom_values.{col_id}` keys.
+- Frontend `CustomColumns.jsx` exports:
+  - `AddColumnButton` (dialog with kind picker + options textarea, only visible
+    when the Directory is filtered by exactly one campaign)
+  - `CustomColumnHeader` (Excel-like filter icon popover with value counts,
+    3-dot menu with Delete-column confirm)
+  - `CustomCell` (inline `<select>` / text input / `<checkbox>` renderers,
+    saves on blur/change, refreshes value counts).
+- `People.jsx` renders `AddColumnButton` in the header, appends custom column
+  headers to `<thead>` and custom cells inside each `PersonRow` **only** when
+  exactly one campaign is filtered. Cross-campaign isolation verified: Campaign
+  A columns never appear when filtering Campaign B.
+- 16/16 backend pytest passing (`/app/backend/tests/test_leadunify_iter7.py`).
+
 ## Implemented (v1 — 2026-07-01)
 
 - One person = one record: import dedup by email → LinkedIn → phone. Soft
-  dedup by name+company similarity is bounded to first-token prefix scan.
-- People Directory: dense table with select-all + per-row checkbox, campaign
+  dedup by name+company similarity is bounded to first-token prefix scan.- People Directory: dense table with select-all + per-row checkbox, campaign
   chips, inline editable notes column, LinkedIn icon, LI/email/phone in
   monospace.
 - Person Detail side panel with campaigns list, add/remove campaigns, notes.
@@ -80,11 +106,10 @@ campaigns; scale target 10–50k contacts.
 
 ## Backlog / next up (P0 → P2)
 
-- **P0 — Flag-for-enrichment button** on people missing phone/LinkedIn (per
-  original spec, deferred from v1).
-- **P0 — Google Sheets direct import (unblock)**: user has provided
+- **P1 — Google Sheets direct import (unblock)**: user has provided
   GOOGLE_CLIENT_ID; add GOOGLE_CLIENT_SECRET to `/app/backend/.env` and
-  restart backend. UI flow is already wired.
+  restart backend. UI flow is already wired. (User deferred this — will
+  update secret later.)
 - **P1 — Bulk delete by all-matching-filter** (not just currently-visible
   page). Currently limited to selected on visible pages.
 - **P1 — Bulk share** — share multiple campaigns at once.
@@ -95,8 +120,12 @@ campaigns; scale target 10–50k contacts.
   campaign) so repeat imports skip the mapping step (spec mentions this).
 - **P2 — Password self-serve reset for members** (currently only admin can
   reset).
-- **P2 — Audit trail on merges** (who merged which company/person, when).
+- **P2 — "Flag for enrichment"** currently only toggles a DB flag; wire to a
+  real enrichment API (Lusha, LI Sales Nav, etc.) in v2.
 - **P2 — In-app onboarding tour** for new invitees.
+- **P2 — Refactor**: split `backend/server.py` (2333 lines) into
+  `routes/people.py`, `routes/campaigns.py`, `routes/columns.py`, etc.
+  Extract `PeopleTable` from `pages/People.jsx` (>1000 lines).
 
 ## Test seed
 
