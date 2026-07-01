@@ -1,0 +1,112 @@
+{
+  "theme": "LIGHT",
+  "archetype": "4 (Swiss & High-Contrast)",
+  "design_philosophy": "Internal operations tool prioritizing clarity, speed, and data density over decoration. Objective, rigid, functional.",
+  "typography": {
+    "fonts": {
+      "headings": {
+        "family": "Manrope",
+        "css_import": "@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap');",
+        "class": "font-['Manrope',sans-serif]"
+      },
+      "body": {
+        "family": "Manrope",
+        "class": "font-['Manrope',sans-serif]"
+      },
+      "monospace": {
+        "family": "JetBrains Mono",
+        "css_import": "@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');",
+        "class": "font-['JetBrains_Mono',monospace]",
+        "usage": "Crucial for emails, phone numbers, and system IDs for fast scanning."
+      }
+    },
+    "hierarchy": {
+      "h1": "text-2xl sm:text-3xl font-bold tracking-tight text-slate-900",
+      "h2": "text-xl sm:text-2xl font-semibold tracking-tight text-slate-900",
+      "h3": "text-lg font-semibold text-slate-900",
+      "body": "text-sm text-slate-700 leading-relaxed",
+      "data_point": "text-sm font-['JetBrains_Mono',monospace] text-slate-600"
+    }
+  },
+  "colors": {
+    "background": {
+      "app": "bg-slate-50",
+      "surface": "bg-white",
+      "panel": "bg-white",
+      "overlay": "bg-slate-900/20 backdrop-blur-sm",
+      "table_header": "bg-slate-100/50"
+    },
+    "text": {
+      "primary": "text-slate-900",
+      "secondary": "text-slate-500",
+      "muted": "text-slate-400"
+    },
+    "border": {
+      "default": "border-slate-200",
+      "divider": "divide-slate-200",
+      "focus": "focus:border-indigo-500 focus:ring-indigo-500"
+    },
+    "accent": {
+      "primary": "bg-indigo-600",
+      "primary_hover": "hover:bg-indigo-700",
+      "primary_text": "text-white"
+    },
+    "status": {
+      "active_campaign": "bg-emerald-50 text-emerald-700 border-emerald-200",
+      "possible_duplicate": "bg-amber-50 text-amber-700 border-amber-200",
+      "inactive": "bg-slate-50 text-slate-700 border-slate-200"
+    }
+  },
+  "layout_spacing": {
+    "philosophy": "Dense and compact. Prioritize data visibility over whitespace.",
+    "page_container": "h-screen flex overflow-hidden bg-slate-50",
+    "main_content": "flex-1 overflow-auto p-4 sm:p-6 lg:p-8",
+    "table": {
+      "cell_padding": "px-3 py-2",
+      "header_padding": "px-3 py-2.5",
+      "density": "tight",
+      "border": "border-b border-slate-200"
+    }
+  },
+  "components": {
+    "chips": "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
+    "side_panel": "fixed inset-y-0 right-0 w-full max-w-md bg-white shadow-2xl border-l border-slate-200 z-50 transform transition-transform duration-300 ease-in-out",
+    "buttons": "inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 disabled:opacity-50 disabled:pointer-events-none px-4 py-2",
+    "inputs": "flex h-9 w-full rounded-md border border-slate-200 bg-transparent px-3 py-1 text-sm shadow-sm transition-colors file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+  },
+  "iconography": {
+    "library": "@phosphor-icons/react",
+    "style": "Regular or bold weights depending on active state. Sharp, technical."
+  },
+  "media": {
+    "avatars": [
+      {
+        "url": "https://images.unsplash.com/photo-1560250097-0b93528c311a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzF8MHwxfHNlYXJjaHwxfHxwcm9mZXNzaW9uYWwlMjBoZWFkc2hvdHxlbnwwfHx8fDE3ODI4MjA5OTJ8MA&ixlib=rb-4.1.0&q=85",
+        "category": "User Profile",
+        "description": "Professional headshot of a man"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzF8MHwxfHNlYXJjaHwzfHxwcm9mZXNzaW9uYWwlMjBoZWFkc2hvdHxlbnwwfHx8fDE3ODI4MjA5OTJ8MA&ixlib=rb-4.1.0&q=85",
+        "category": "User Profile",
+        "description": "Professional headshot of a woman"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1627161683077-e34782c24d81?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjY2NzF8MHwxfHNlYXJjaHwyfHxwcm9mZXNzaW9uYWwlMjBoZWFkc2hvdHxlbnwwfHx8fDE3ODI4MjA5OTJ8MA&ixlib=rb-4.1.0&q=85",
+        "category": "User Profile",
+        "description": "Professional headshot of a woman smiling"
+      }
+    ],
+    "logos": []
+  },
+  "instructions_to_main_agent": [
+    "CRITICAL: Use Manrope for standard interface text and JetBrains Mono exclusively for emails, phone numbers, and IDs.",
+    "Skip the standard Shadcn 'Card' wrapper for the main People Directory table; allow it to fill the viewport width for maximum data density.",
+    "Apply `data-testid` to all interactive elements (buttons, table rows, input fields, and tab toggles).",
+    "Implement the 'Person Detail' and 'Chat Assistant' as sliding side panels rather than separate pages to maintain workflow context.",
+    "For the Duplicate Review Queue, use a side-by-side comparison layout with sticky headers to facilitate fast merging.",
+    "Campaign chips are the primary visual focus in tables: use the `status` color objects (Emerald for active, Amber for duplicates).",
+    "Empty states should be actionable (e.g., a dashed dropzone for 'Import your first sheet') rather than a blank table.",
+    "The application should default routing directly to the People Directory, bypassing any generic dashboard overview if not authenticated.",
+    "For navigation, implement a dense, functional sidebar using the brand's Indigo-600 for active states."
+  ]
+}
