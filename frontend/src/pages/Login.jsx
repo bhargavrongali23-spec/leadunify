@@ -12,7 +12,7 @@ export default function LoginPage() {
   const { login, register } = useAuth();
   const navigate = useNavigate();
   const [mode, setMode] = useState("login");
-  const [email, setEmail] = useState("admin@vaultedge.com");
+  const [email, setEmail] = useState("admin@leadunify.com");
   const [password, setPassword] = useState("admin123");
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(false);
@@ -40,8 +40,8 @@ export default function LoginPage() {
             <Sparkles className="w-4 h-4" strokeWidth={2.4} />
           </div>
           <div>
-            <div className="text-[15px] font-bold tracking-tight text-slate-900">Vaultedge</div>
-            <div className="text-[11px] text-slate-500">Outreach Hub</div>
+            <div className="text-[15px] font-bold tracking-tight text-slate-900">LeadUnify</div>
+            <div className="text-[11px] text-slate-500">Contact intelligence</div>
           </div>
         </div>
 
@@ -81,7 +81,7 @@ export default function LoginPage() {
               <div className="w-8 h-8 rounded-md bg-indigo-600 flex items-center justify-center text-white">
                 <Sparkles className="w-4 h-4" strokeWidth={2.4} />
               </div>
-              <div className="text-[15px] font-bold tracking-tight">Vaultedge Outreach Hub</div>
+              <div className="text-[15px] font-bold tracking-tight">LeadUnify</div>
             </div>
 
             <h2 className="text-2xl font-bold tracking-tight text-slate-900">
@@ -175,7 +175,7 @@ export default function LoginPage() {
             {mode === "login" && (
               <div className="mt-4 p-3 bg-slate-50 rounded-md border border-slate-200 text-xs text-slate-600">
                 <div className="font-medium text-slate-700 mb-1">Demo credentials pre-filled</div>
-                <div className="text-mono text-slate-500">admin@vaultedge.com / admin123</div>
+                <div className="text-mono text-slate-500">admin@leadunify.com / admin123</div>
               </div>
             )}
           </CardContent>

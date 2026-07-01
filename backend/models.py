@@ -1,4 +1,4 @@
-"""Pydantic models for Vaultedge Outreach Hub."""
+"""Pydantic models for LeadUnify."""
 from __future__ import annotations
 
 from datetime import datetime, timezone

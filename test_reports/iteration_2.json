@@ -1,0 +1,36 @@
+{
+  "summary": "Full-stack retest of LeadUnify after rename + 8 bug fixes. All 12 backend pytest cases pass (rename, Bearer + cookie auth, one-person-many-campaigns, in_campaigns OR/union, global-optimal column mapping with First Name / Last Name / Notes, first+last -> full_name combining on import, Bhargav dedup by email, chat via Claude Sonnet 4.5, sheets 503 graceful). Frontend verified end-to-end: login page shows LeadUnify + admin@leadunify.com demo creds (no Vaultedge), sidebar shows LeadUnify/Outreach Hub, JWT stored as localStorage['leadunify_access_token'] and attached as Authorization: Bearer on every /api/ request (verified 9 outgoing requests carried the header). Campaign card click navigates to /people?in=<id>, header shows 'Campaign · MBA Annual 2026' via data-testid=context-campaign-title, exactly 7 person-rows render matching the card's people_count of 7, clear-context-filter link works. Company card click navigates to /people?company=<name>, header shows 'Company · Arc Home', 11 people listed (all with Arc Home). Import page pre-fills new-campaign-name with 'test_first_last' from the uploaded CSV filename, and STANDARD_FIELDS array now exposes data-testid map-first_name, map-last_name, map-notes alongside the existing fields. Chat panel opens with data-testid chat-input/chat-send-btn (backend chat integration confirmed via pytest).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Campaigns list", "issues": ["React hydration warning in console: <button> descendant of <button> — CampaignChip renders a <button> inside the outer campaign-card <button>. Not user-visible but produces a console warning and technically invalid HTML. Consider changing the inner CampaignChip to a <span role=button> or make the outer card a <div onClick>."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_leadunify_backend.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Optional: fix nested-button hydration warning on Campaigns page (see design_issues)."
+  ],
+  "critical_code_review_comments": [
+    "server.py is still 1400+ lines — consider splitting into routers as pattern volumes grow (people, import, auth, chat, sheets).",
+    "STAGED dict for import tokens remains in-process memory; a backend restart drops mid-import sessions. Fine for internal tool, but move to Mongo or Redis if it ever needs to scale beyond one worker.",
+    "Cookies are set with secure=True — correct for HTTPS ingress but silently drops over plain HTTP; already noted last iteration."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_leadunify_backend.py (new — replaces the old vaultedge test file which was deleted)"
+  ],
+  "success_rate": {"backend": "100% (12/12)", "frontend": "100% (all bug-fix flows verified)"},
+  "test_credentials": "admin@leadunify.com / admin123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "The import-dedup test creates a temporary 'TEST_FirstLast_<ts>' campaign and adds Sarah Mitchell + Alex Vega, then cleans them up (deletes campaign + newly-created people) after the assertions so re-runs stay at the seeded 20 people / 7 campaigns.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend pytest: REACT_APP_BACKEND_URL=<url> python -m pytest backend/tests/test_leadunify_backend.py -v (runs in ~7s under pytest-xdist with 2 workers). JWT is stored under localStorage['leadunify_access_token'] — do NOT use 'access_token' as the key. Frontend axios attaches Authorization: Bearer on every /api/ call, verified via page.on('request'). Chat panel has data-testid chat-input and chat-send-btn but the send button can end up below the viewport on 1080p — scroll it into view before clicking. Google Sheets remains intentionally disabled (GOOGLE_CLIENT_SECRET empty → 503 on /api/oauth/sheets/login, {configured:false} on /api/sheets/status).",
+  "rca of the issue": "Not applicable — this was a bug-fix verification run, all 8 reported fixes verified working end-to-end. Root causes were fixed by main agent as documented in the review request: (1) rename via .env + templates + frontend brand components, (2) axios interceptor + localStorage in AuthContext, (3-4) URL-param sync in People.jsx via useSearchParams + context banner, (5) global-optimal mapping algorithm in _suggest_mapping, (6) first_name+last_name combining in dedup.process_import_row, (7) filename-basename default in Import.jsx onFile handler, (8) $in with $or list in _build_people_query."
+}

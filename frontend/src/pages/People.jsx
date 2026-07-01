@@ -24,23 +24,58 @@ import {
   Save,
   Upload,
 } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 
 export default function PeoplePage() {
   const navigate = useNavigate();
-  const [search, setSearch] = useState("");
-  const [debounced, setDebounced] = useState("");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [search, setSearch] = useState(searchParams.get("search") || "");
+  const [debounced, setDebounced] = useState(searchParams.get("search") || "");
   const [campaigns, setCampaigns] = useState([]);
-  const [inCampaigns, setInCampaigns] = useState([]);
-  const [notInCampaigns, setNotInCampaigns] = useState([]);
-  const [companyFilter, setCompanyFilter] = useState("");
+  const [inCampaigns, setInCampaigns] = useState(
+    searchParams.get("in") ? [searchParams.get("in")] : []
+  );
+  const [notInCampaigns, setNotInCampaigns] = useState(
+    searchParams.get("notIn") ? [searchParams.get("notIn")] : []
+  );
+  const [companyFilter, setCompanyFilter] = useState(searchParams.get("company") || "");
   const [page, setPage] = useState(1);
   const pageSize = 25;
   const [data, setData] = useState({ items: [], total: 0 });
   const [loading, setLoading] = useState(false);
   const [savedFilters, setSavedFilters] = useState([]);
   const [saveName, setSaveName] = useState("");
+  const [activeCampaignInfo, setActiveCampaignInfo] = useState(null);
+  const [activeCompanyInfo, setActiveCompanyInfo] = useState(null);
+
+  // Re-sync when the URL changes (e.g., user clicks a different campaign card).
+  useEffect(() => {
+    const s = searchParams.get("search") || "";
+    const inC = searchParams.get("in");
+    const notInC = searchParams.get("notIn");
+    const co = searchParams.get("company") || "";
+    setSearch(s);
+    setDebounced(s);
+    setInCampaigns(inC ? [inC] : []);
+    setNotInCampaigns(notInC ? [notInC] : []);
+    setCompanyFilter(co);
+    setPage(1);
+  }, [searchParams.toString()]);
+
+  // Compute the "context" label shown in the header (campaign name or company name)
+  useEffect(() => {
+    if (inCampaigns.length === 1 && campaigns.length) {
+      const c = campaigns.find((x) => x.id === inCampaigns[0]);
+      setActiveCampaignInfo(c || null);
+    } else {
+      setActiveCampaignInfo(null);
+    }
+  }, [inCampaigns, campaigns]);
+
+  useEffect(() => {
+    setActiveCompanyInfo(companyFilter || null);
+  }, [companyFilter]);
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(search), 250);
@@ -123,7 +158,9 @@ export default function PeoplePage() {
     setInCampaigns([]);
     setNotInCampaigns([]);
     setCompanyFilter("");
+    setSearch("");
     setPage(1);
+    setSearchParams({});
   };
 
   const saveCurrent = async () => {
@@ -168,9 +205,36 @@ export default function PeoplePage() {
       <div className="border-b border-slate-200 bg-white px-6 py-4">
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div>
-            <h1 className="text-xl font-bold tracking-tight text-slate-900">People Directory</h1>
+            <h1 className="text-xl font-bold tracking-tight text-slate-900">
+              {activeCampaignInfo ? (
+                <span data-testid="context-campaign-title">
+                  Campaign · <span className="text-indigo-700">{activeCampaignInfo.name}</span>
+                </span>
+              ) : activeCompanyInfo ? (
+                <span data-testid="context-company-title">
+                  Company · <span className="text-indigo-700">{activeCompanyInfo}</span>
+                </span>
+              ) : (
+                "People Directory"
+              )}
+            </h1>
             <p className="text-xs text-slate-500 mt-0.5">
-              {loading ? "Loading…" : `${data.total.toLocaleString()} unique people`}
+              {loading
+                ? "Loading…"
+                : activeCampaignInfo
+                ? `${data.total.toLocaleString()} people in this campaign`
+                : activeCompanyInfo
+                ? `${data.total.toLocaleString()} people at ${activeCompanyInfo}`
+                : `${data.total.toLocaleString()} unique people`}
+              {(activeCampaignInfo || activeCompanyInfo) && (
+                <button
+                  onClick={clearFilters}
+                  data-testid="clear-context-filter"
+                  className="ml-2 text-indigo-600 hover:text-indigo-700 font-medium"
+                >
+                  · Show all people
+                </button>
+              )}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -232,7 +296,7 @@ export default function PeoplePage() {
             </PopoverTrigger>
             <PopoverContent align="start" className="p-2 w-72">
               <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide px-2 py-1">
-                Person IS in
+                Person is in ANY of
               </div>
               <div className="max-h-64 overflow-y-auto">
                 {campaigns.map((c) => (

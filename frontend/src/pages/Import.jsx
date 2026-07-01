@@ -22,11 +22,14 @@ import { formatApiErrorDetail } from "@/lib/api";
 
 const STANDARD_FIELDS = [
   { key: "full_name", label: "Full name" },
+  { key: "first_name", label: "First name" },
+  { key: "last_name", label: "Last name" },
   { key: "primary_email", label: "Email" },
   { key: "phone", label: "Phone" },
   { key: "linkedin_url", label: "LinkedIn URL" },
   { key: "company_name", label: "Company" },
   { key: "job_title", label: "Job title" },
+  { key: "notes", label: "Notes" },
 ];
 
 export default function ImportPage() {
@@ -87,6 +90,11 @@ export default function ImportPage() {
       });
       setPreview(data);
       setMapping(data.suggested_mapping || {});
+      // Default the campaign name to the file name (without extension).
+      // The user can still edit or switch to an existing campaign.
+      const defaultName = (data.file_name || "").replace(/\.(csv|xlsx|xls)$/i, "").trim();
+      setNewCampaignName(defaultName);
+      setCampaignMode("new");
       setStep("map");
     } catch (e) {
       toast.error(formatApiErrorDetail(e.response?.data?.detail) || "Upload failed");
@@ -99,10 +107,13 @@ export default function ImportPage() {
     if (
       !mapping.primary_email &&
       !mapping.linkedin_url &&
-      !mapping.phone
+      !mapping.phone &&
+      !mapping.full_name &&
+      !mapping.first_name &&
+      !mapping.last_name
     ) {
       toast.error(
-        "Map at least one identifier column (Email, LinkedIn, or Phone) to continue."
+        "Map at least one column (Email, LinkedIn, Phone, or a Name column) to continue."
       );
       return;
     }

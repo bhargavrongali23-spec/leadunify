@@ -1,4 +1,4 @@
-"""Vaultedge Outreach Hub — FastAPI backend."""
+"""LeadUnify — FastAPI backend."""
 from __future__ import annotations
 
 from dotenv import load_dotenv
@@ -74,11 +74,11 @@ REFRESH_TOKEN_DAYS = 30
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
-app = FastAPI(title="Vaultedge Outreach Hub")
+app = FastAPI(title="LeadUnify")
 api = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-logger = logging.getLogger("vaultedge")
+logger = logging.getLogger("leadunify")
 
 # ---------------------------------------------------------------------------
 # Password hashing / JWT helpers
@@ -474,13 +474,16 @@ async def _build_people_query(filters: dict) -> dict:
     if filters.get("source"):
         ands.append({"sources.source_name": {"$regex": re.escape(filters["source"]), "$options": "i"}})
 
-    # in_campaigns: person MUST be in ALL of these
+    # in_campaigns: person is in ANY of the selected campaigns (OR/union)
     include_ids = filters.get("in_campaigns") or []
     if include_ids:
-        # For each id, we need a person_campaigns doc.
-        for cid in include_ids:
-            pids = [d["person_id"] async for d in db.person_campaigns.find({"campaign_id": cid}, {"person_id": 1})]
-            ands.append({"_id": {"$in": [ObjectId(p) for p in pids]}})
+        pids = set()
+        cursor = db.person_campaigns.find(
+            {"campaign_id": {"$in": include_ids}}, {"person_id": 1}
+        )
+        async for d in cursor:
+            pids.add(d["person_id"])
+        ands.append({"_id": {"$in": [ObjectId(p) for p in pids if ObjectId.is_valid(p)]}})
 
     # not_in_campaigns: person MUST NOT be in any of these
     exclude_ids = filters.get("not_in_campaigns") or []
@@ -747,30 +750,107 @@ async def delete_person(person_id: str, user: dict = Depends(get_current_user)):
 # ---------------------------------------------------------------------------
 # Import — preview + commit
 # ---------------------------------------------------------------------------
-STANDARD_FIELDS = ["full_name", "primary_email", "phone", "linkedin_url", "company_name", "job_title"]
+STANDARD_FIELDS = ["full_name", "first_name", "last_name", "primary_email", "phone", "linkedin_url", "company_name", "job_title", "notes"]
 
 HEADER_HINTS: dict[str, list[str]] = {
-    "full_name": ["name", "full name", "contact", "contact name", "fullname"],
-    "primary_email": ["email", "e-mail", "email address", "mail"],
-    "phone": ["phone", "mobile", "cell", "telephone", "contact number"],
-    "linkedin_url": ["linkedin", "linkedin url", "linkedin profile", "li"],
-    "company_name": ["company", "organization", "org", "employer", "company name"],
-    "job_title": ["title", "job title", "role", "position", "designation"],
+    "full_name": [
+        "name", "full name", "fullname", "contact", "contact name",
+        "person", "person name", "prospect", "lead name", "customer name",
+    ],
+    "first_name": ["first name", "first", "firstname", "given name", "fname"],
+    "last_name": ["last name", "last", "lastname", "surname", "family name", "lname"],
+    "primary_email": [
+        "email", "e-mail", "email address", "mail", "work email",
+        "business email", "primary email", "contact email",
+    ],
+    "phone": [
+        "phone", "mobile", "cell", "cellular", "telephone", "tel",
+        "contact number", "phone number", "mobile number", "cell number",
+        "work phone", "office phone",
+    ],
+    "linkedin_url": [
+        "linkedin", "linkedin url", "linkedin profile", "linkedin link",
+        "li", "linkedin.com", "profile url", "linkedin profile url",
+    ],
+    "company_name": [
+        "company", "organization", "organisation", "org", "employer",
+        "company name", "workplace", "firm", "business", "account",
+    ],
+    "job_title": [
+        "title", "job title", "role", "position", "designation",
+        "job", "job role", "job position",
+    ],
+    "notes": ["notes", "note", "comments", "comment", "remarks", "description", "about"],
 }
 
 
+def _norm_header(h: str) -> str:
+    """Normalize a header for matching: lowercase, remove punctuation."""
+    if not h:
+        return ""
+    s = str(h).strip().lower()
+    s = re.sub(r"[_\-.]+", " ", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
 def _suggest_mapping(headers: list[str]) -> dict[str, str]:
-    lower = [(h or "").strip().lower() for h in headers]
-    mapping: dict[str, str] = {}
-    used = set()
+    """Suggest a best-guess mapping of standard fields to sheet headers.
+
+    Strategy: score every (field, header) pair, then greedily assign the
+    strongest matches first. This prevents a weak match on one field from
+    stealing a header that another field would match more strongly.
+
+    Rank scale (lower = stronger):
+        0 — header text equals the field key
+        1 — header exactly equals a hint (or same set of words as a hint)
+        2 — hint and header share at least one word
+        3 — hint appears as a substring of header (or vice versa)
+    """
+    normalized = [_norm_header(h) for h in headers]
+    candidates: list[tuple[int, int, str, int]] = []  # (rank, field_priority, field, header_idx)
+
+    field_priority = {name: i for i, name in enumerate(STANDARD_FIELDS)}
+
     for field, hints in HEADER_HINTS.items():
-        for i, h in enumerate(lower):
-            if h in used:
+        for i, n in enumerate(normalized):
+            if not n:
                 continue
-            if h == field or h in hints or any(hint in h for hint in hints):
-                mapping[field] = headers[i]
-                used.add(h)
-                break
+
+            best_rank = None
+            field_as_phrase = field.replace("_", " ")
+
+            if n == field or n == field_as_phrase:
+                best_rank = 0
+            else:
+                words_n = set(n.split())
+                for hint in hints:
+                    if n == hint:
+                        best_rank = 1
+                        break
+                    words_h = set(hint.split())
+                    if words_n and words_n == words_h:
+                        best_rank = min(best_rank if best_rank is not None else 99, 1)
+                    if words_n & words_h:
+                        best_rank = min(best_rank if best_rank is not None else 99, 2)
+                    if hint in n or n in hint:
+                        best_rank = min(best_rank if best_rank is not None else 99, 3)
+
+            if best_rank is not None:
+                candidates.append((best_rank, field_priority.get(field, 99), field, i))
+
+    candidates.sort()
+
+    mapping: dict[str, str] = {}
+    used_fields: set[str] = set()
+    used_headers: set[int] = set()
+    for _rank, _prio, field, idx in candidates:
+        if field in used_fields or idx in used_headers:
+            continue
+        mapping[field] = headers[idx]
+        used_fields.add(field)
+        used_headers.add(idx)
+
     return mapping
 
 
@@ -833,10 +913,17 @@ async def import_commit(payload: ImportCommit, user: dict = Depends(get_current_
         raise HTTPException(status_code=400, detail="Upload token expired — please re-upload the file")
     headers, rows, filename = staged
 
-    if "primary_email" not in payload.mapping and "linkedin_url" not in payload.mapping and "phone" not in payload.mapping:
+    identifier_fields = {"primary_email", "linkedin_url", "phone"}
+    name_fields = {"full_name", "first_name", "last_name"}
+    has_identifier = any(f in payload.mapping and payload.mapping[f] for f in identifier_fields)
+    has_name = any(f in payload.mapping and payload.mapping[f] for f in name_fields)
+    if not has_identifier and not has_name:
         raise HTTPException(
             status_code=400,
-            detail="Map at least one identifier column (Email, LinkedIn, or Phone) to continue.",
+            detail=(
+                "Map at least one column to a standard field. Recommended: Email, LinkedIn or "
+                "Phone (used to detect duplicates) — or a Name column."
+            ),
         )
 
     # Resolve campaign
@@ -1088,7 +1175,7 @@ class ChatInput(BaseModel):
     history: Optional[List[dict]] = None  # optional [{role, content}]
 
 
-SYSTEM_PROMPT = """You are the Vaultedge Outreach Hub assistant. Your job is to translate a
+SYSTEM_PROMPT = """You are the LeadUnify assistant. Your job is to translate a
 user's natural-language request about their sales contact database into a strict JSON filter payload
 that the app can execute against MongoDB. You also produce a short human-readable summary of what
 you understood.
@@ -1151,7 +1238,7 @@ async def chat_query(payload: ChatInput, user: dict = Depends(get_current_user))
         campaign_names.append(f"- {c['name']} ({c.get('status','Active')})")
     context_block = "Known campaigns:\n" + "\n".join(campaign_names) if campaign_names else ""
 
-    session_id = f"vaultedge-{user['_id']}"
+    session_id = f"leadunify-{user['_id']}"
     chat = LlmChat(
         api_key=api_key,
         session_id=session_id,
@@ -1403,7 +1490,7 @@ async def sheets_preview(payload: SheetsImportPreview, user: dict = Depends(get_
 # ---------------------------------------------------------------------------
 @api.get("/")
 async def root():
-    return {"service": "Vaultedge Outreach Hub", "status": "ok"}
+    return {"service": "LeadUnify", "status": "ok"}
 
 
 # ---------------------------------------------------------------------------

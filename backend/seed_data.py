@@ -69,7 +69,7 @@ async def seed_demo_data(db) -> dict:
         "campaign_name": "Demo Seed",
         "column_mapping": {},
         "imported_by": None,
-        "imported_by_email": "admin@vaultedge.com",
+        "imported_by_email": "admin@leadunify.com",
         "created_at": utc_now_iso(),
         "stats": {"total_rows": len(DEMO_PEOPLE), "new_people": len(DEMO_PEOPLE)},
     }

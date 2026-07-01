@@ -239,9 +239,19 @@ async def process_import_row(
     email = normalize_email(raw_row.get("primary_email"))
     phone = normalize_phone(raw_row.get("phone"))
     linkedin = normalize_linkedin(raw_row.get("linkedin_url"))
+
+    # Combine first_name + last_name into full_name when full_name isn't present
     full_name = clean_str(raw_row.get("full_name"))
+    if not full_name:
+        first = clean_str(raw_row.get("first_name"))
+        last = clean_str(raw_row.get("last_name"))
+        combined = " ".join(x for x in [first, last] if x)
+        if combined:
+            full_name = combined
+
     company_name = clean_str(raw_row.get("company_name"))
     job_title = clean_str(raw_row.get("job_title"))
+    notes = clean_str(raw_row.get("notes"))
 
     # Skip rows with no useful data
     if not any([email, phone, linkedin, full_name]):
@@ -307,7 +317,7 @@ async def process_import_row(
         "company_name": resolved_company,
         "job_title": job_title,
         "tags": [],
-        "notes": None,
+        "notes": notes,
         "sources": [{
             "batch_id": batch_id,
             "source_name": source_name,

@@ -38,7 +38,7 @@ export default function Sidebar({ onOpenChat, duplicatesCount = 0 }) {
           </div>
           <div>
             <div className="text-[15px] font-bold tracking-tight text-slate-900 leading-none">
-              Vaultedge
+              LeadUnify
             </div>
             <div className="text-[11px] text-slate-500 mt-0.5">Outreach Hub</div>
           </div>
