@@ -206,6 +206,7 @@ async def _startup() -> None:
     await db.audit_log.create_index([("created_at", -1)])
     await db.audit_log.create_index("action")
     await db.people.create_index("enrichment_flag")
+    await db.campaign_columns.create_index([("campaign_id", 1), ("position", 1)])
 
     # seed admin
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@vaultedge.com").lower()
@@ -633,7 +634,194 @@ async def delete_campaign(campaign_id: str, user: dict = Depends(get_current_use
         raise HTTPException(status_code=400, detail="Invalid campaign id")
     await db.campaigns.delete_one({"_id": oid})
     await db.person_campaigns.delete_many({"campaign_id": campaign_id})
+    await db.campaign_columns.delete_many({"campaign_id": campaign_id})
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Campaign custom columns (Excel-like extra fields, PER campaign)
+# ---------------------------------------------------------------------------
+class CampaignColumnInput(BaseModel):
+    name: str
+    kind: str = "text"  # "text" | "select" | "checkbox"
+    options: Optional[List[str]] = None
+    position: Optional[int] = None
+
+
+class CampaignColumnPatch(BaseModel):
+    name: Optional[str] = None
+    options: Optional[List[str]] = None
+    position: Optional[int] = None
+
+
+class CampaignCellInput(BaseModel):
+    column_id: str
+    value: Any = None  # str | bool | None
+
+
+async def _assert_campaign_access(campaign_id: str, user: dict) -> dict:
+    """Return the campaign doc if the user has access, else 403/404."""
+    try:
+        oid = ObjectId(campaign_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid campaign id")
+    camp = await db.campaigns.find_one({"_id": oid})
+    if not camp:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    uid = str(user["_id"])
+    is_admin = user.get("role") == "admin"
+    if not is_admin and camp.get("owner_id") not in (None, uid) and uid not in (camp.get("shared_with_user_ids") or []):
+        raise HTTPException(status_code=403, detail="You don't have access to this campaign")
+    return camp
+
+
+@api.get("/campaigns/{campaign_id}/columns")
+async def list_campaign_columns(campaign_id: str, user: dict = Depends(get_current_user)):
+    await _assert_campaign_access(campaign_id, user)
+    cursor = db.campaign_columns.find({"campaign_id": campaign_id}).sort("position", 1)
+    return {"items": [serialize_doc(d) async for d in cursor]}
+
+
+@api.post("/campaigns/{campaign_id}/columns")
+async def create_campaign_column(
+    campaign_id: str, payload: CampaignColumnInput, user: dict = Depends(get_current_user)
+):
+    await _assert_campaign_access(campaign_id, user)
+    if not payload.name.strip():
+        raise HTTPException(status_code=400, detail="Column name required")
+    if payload.kind not in ("text", "select", "checkbox"):
+        raise HTTPException(status_code=400, detail="Kind must be text, select, or checkbox")
+    if payload.kind == "select" and not (payload.options or []):
+        raise HTTPException(status_code=400, detail="Select columns need at least one option")
+
+    if payload.position is None:
+        max_pos = 0
+        async for d in db.campaign_columns.find({"campaign_id": campaign_id}, {"position": 1}).sort("position", -1).limit(1):
+            max_pos = int(d.get("position") or 0)
+        position = max_pos + 1
+    else:
+        position = payload.position
+
+    doc = {
+        "campaign_id": campaign_id,
+        "name": payload.name.strip(),
+        "kind": payload.kind,
+        "options": payload.options or [],
+        "position": position,
+        "created_at": utc_now_iso(),
+        "created_by": user.get("email"),
+    }
+    result = await db.campaign_columns.insert_one(doc)
+    doc["_id"] = result.inserted_id
+    return serialize_doc(doc)
+
+
+@api.patch("/campaigns/{campaign_id}/columns/{column_id}")
+async def update_campaign_column(
+    campaign_id: str, column_id: str, payload: CampaignColumnPatch, user: dict = Depends(get_current_user)
+):
+    await _assert_campaign_access(campaign_id, user)
+    try:
+        oid = ObjectId(column_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid column id")
+    updates = {k: v for k, v in payload.model_dump(exclude_none=True).items()}
+    if "name" in updates:
+        updates["name"] = updates["name"].strip()
+    if not updates:
+        return {"ok": True}
+    await db.campaign_columns.update_one({"_id": oid, "campaign_id": campaign_id}, {"$set": updates})
+    doc = await db.campaign_columns.find_one({"_id": oid})
+    return serialize_doc(doc)
+
+
+@api.delete("/campaigns/{campaign_id}/columns/{column_id}")
+async def delete_campaign_column(
+    campaign_id: str, column_id: str, user: dict = Depends(get_current_user)
+):
+    await _assert_campaign_access(campaign_id, user)
+    try:
+        oid = ObjectId(column_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid column id")
+    await db.campaign_columns.delete_one({"_id": oid, "campaign_id": campaign_id})
+    # Remove any cell values under that column key across the campaign
+    await db.person_campaigns.update_many(
+        {"campaign_id": campaign_id},
+        {"$unset": {f"custom_values.{column_id}": ""}},
+    )
+    return {"ok": True}
+
+
+@api.patch("/campaigns/{campaign_id}/cells/{person_id}")
+async def update_campaign_cell(
+    campaign_id: str, person_id: str, payload: CampaignCellInput, user: dict = Depends(get_current_user)
+):
+    """Set (or clear) one custom-column cell value for a person in a campaign."""
+    await _assert_campaign_access(campaign_id, user)
+    # Ensure the link exists — if not, create it (adding the person to the campaign implicitly).
+    link = await db.person_campaigns.find_one({"person_id": person_id, "campaign_id": campaign_id})
+    if not link:
+        await db.person_campaigns.insert_one({
+            "person_id": person_id,
+            "campaign_id": campaign_id,
+            "status": "Not Contacted",
+            "added_at": utc_now_iso(),
+            "custom_values": {},
+        })
+    # Validate column exists
+    try:
+        col_oid = ObjectId(payload.column_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid column id")
+    column = await db.campaign_columns.find_one({"_id": col_oid, "campaign_id": campaign_id})
+    if not column:
+        raise HTTPException(status_code=404, detail="Column not found")
+
+    key = f"custom_values.{payload.column_id}"
+    if payload.value is None or payload.value == "":
+        await db.person_campaigns.update_one(
+            {"person_id": person_id, "campaign_id": campaign_id},
+            {"$unset": {key: ""}},
+        )
+    else:
+        # For select columns, ensure value is one of options (or fall through if list is empty)
+        if column["kind"] == "select" and column.get("options") and payload.value not in column["options"]:
+            raise HTTPException(status_code=400, detail=f"Value must be one of: {', '.join(column['options'])}")
+        await db.person_campaigns.update_one(
+            {"person_id": person_id, "campaign_id": campaign_id},
+            {"$set": {key: payload.value}},
+        )
+    return {"ok": True}
+
+
+@api.get("/campaigns/{campaign_id}/cell-value-counts")
+async def cell_value_counts(campaign_id: str, user: dict = Depends(get_current_user)):
+    """Return distinct value counts per column for the campaign — used to
+    render the Excel-like filter popover with real distributions."""
+    await _assert_campaign_access(campaign_id, user)
+    columns = [serialize_doc(c) async for c in db.campaign_columns.find({"campaign_id": campaign_id})]
+    result: dict = {}
+    total_links = await db.person_campaigns.count_documents({"campaign_id": campaign_id})
+    for col in columns:
+        cid = col["id"]
+        pipeline = [
+            {"$match": {"campaign_id": campaign_id}},
+            {"$group": {"_id": f"$custom_values.{cid}", "count": {"$sum": 1}}},
+        ]
+        counts = []
+        with_value = 0
+        async for d in db.person_campaigns.aggregate(pipeline):
+            v = d["_id"]
+            if v is None or v == "":
+                continue
+            counts.append({"value": v, "count": d["count"]})
+            with_value += d["count"]
+        empty = total_links - with_value
+        if empty > 0:
+            counts.append({"value": "__empty", "count": empty, "label": "(empty)"})
+        result[cid] = counts
+    return {"counts": result}
 
 
 # ---------------------------------------------------------------------------
@@ -707,20 +895,56 @@ async def _build_people_query(filters: dict) -> dict:
     if filters.get("needs_enrichment"):
         ands.append({"enrichment_flag": True})
 
+    # Custom-column filters — apply only when exactly one campaign is in `in_campaigns`
+    # (custom columns belong to a specific campaign).
+    custom = filters.get("custom_filters") or {}
+    in_ids = filters.get("in_campaigns") or []
+    if custom and len(in_ids) == 1:
+        campaign_id = in_ids[0]
+        # For each column filter, gather person_ids whose cell value is in allowed set.
+        for column_id, allowed in custom.items():
+            if not allowed:
+                continue
+            allowed_set = list(allowed) if isinstance(allowed, list) else [allowed]
+            pids = set()
+            # "__empty" is a sentinel meaning "cell is missing / empty"
+            include_empty = "__empty" in allowed_set
+            concrete = [v for v in allowed_set if v != "__empty"]
+            key = f"custom_values.{column_id}"
+            or_clauses: List[dict] = []
+            if concrete:
+                or_clauses.append({key: {"$in": concrete}})
+            if include_empty:
+                or_clauses.append({key: {"$in": [None, ""]}})
+                or_clauses.append({key: {"$exists": False}})
+            cursor = db.person_campaigns.find(
+                {"campaign_id": campaign_id, "$or": or_clauses} if or_clauses else {"campaign_id": campaign_id},
+                {"person_id": 1},
+            )
+            async for d in cursor:
+                pids.add(d["person_id"])
+            ands.append({"_id": {"$in": [ObjectId(p) for p in pids if ObjectId.is_valid(p)]}})
+
     if ands:
         q["$and"] = ands
     return q
 
 
-async def _hydrate_people(docs: List[dict]) -> List[dict]:
-    """Attach campaign chips to each person."""
+async def _hydrate_people(docs: List[dict], single_campaign_id: Optional[str] = None) -> List[dict]:
+    """Attach campaign chips to each person.
+    If `single_campaign_id` is provided, also attach that campaign's custom
+    cell values (from person_campaigns.custom_values) under key `custom_values`.
+    """
     if not docs:
         return []
     ids = [str(d["_id"]) for d in docs]
     # bulk load links
     links: dict[str, list] = {}
+    custom_by_person: dict[str, dict] = {}
     async for link in db.person_campaigns.find({"person_id": {"$in": ids}}):
         links.setdefault(link["person_id"], []).append(link["campaign_id"])
+        if single_campaign_id and link.get("campaign_id") == single_campaign_id:
+            custom_by_person[link["person_id"]] = link.get("custom_values") or {}
     # bulk load campaigns
     campaign_ids = list({c for arr in links.values() for c in arr})
     campaigns: dict[str, dict] = {}
@@ -732,6 +956,8 @@ async def _hydrate_people(docs: List[dict]) -> List[dict]:
     for d in docs:
         s = serialize_doc(d)
         s["campaigns"] = [campaigns[cid] for cid in links.get(s["id"], []) if cid in campaigns]
+        if single_campaign_id:
+            s["custom_values"] = custom_by_person.get(s["id"], {})
         out.append(s)
     return out
 
@@ -747,6 +973,9 @@ class PeopleQuery(BaseModel):
     not_in_campaigns: Optional[List[str]] = None
     created_after: Optional[str] = None
     needs_enrichment: Optional[bool] = None
+    # {column_id: [allowed values]} — only applied when `in_campaigns` narrows to
+    # exactly one campaign that owns those columns.
+    custom_filters: Optional[dict] = None
     page: int = 1
     page_size: int = 25
     sort_by: Optional[str] = "updated_at"
@@ -764,7 +993,8 @@ async def query_people(payload: PeopleQuery, _: dict = Depends(get_current_user)
     size = max(1, min(payload.page_size, 200))
     cursor = db.people.find(q).sort(sort_by, sort_dir).skip((page - 1) * size).limit(size)
     docs = [d async for d in cursor]
-    items = await _hydrate_people(docs)
+    single_campaign_id = payload.in_campaigns[0] if payload.in_campaigns and len(payload.in_campaigns) == 1 else None
+    items = await _hydrate_people(docs, single_campaign_id=single_campaign_id)
     return {"items": items, "total": total, "page": page, "page_size": size}
 
 

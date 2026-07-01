@@ -3,6 +3,11 @@ import { api } from "@/lib/api";
 import { openPerson } from "@/components/AppLayout";
 import { CampaignChip } from "@/components/CampaignChip";
 import NotesCell from "@/components/NotesCell";
+import {
+  AddColumnButton,
+  CustomColumnHeader,
+  CustomCell,
+} from "@/components/CustomColumns";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -64,6 +69,9 @@ export default function PeoplePage() {
   const [activeCompanyInfo, setActiveCompanyInfo] = useState(null);
   const [activeCompany, setActiveCompany] = useState(null); // full company doc (for notes editor)
   const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [customColumns, setCustomColumns] = useState([]);
+  const [customFilters, setCustomFilters] = useState({}); // { column_id: [values] }
+  const [valueCounts, setValueCounts] = useState({}); // { column_id: [{value, count}] }
 
   // Re-sync when the URL changes (e.g., user clicks a different campaign card).
   useEffect(() => {
@@ -124,11 +132,47 @@ export default function PeoplePage() {
       in_campaigns: inCampaigns.length ? inCampaigns : null,
       not_in_campaigns: notInCampaigns.length ? notInCampaigns : null,
       needs_enrichment: needsEnrichment || null,
+      custom_filters: Object.keys(customFilters).length ? customFilters : null,
       page,
       page_size: pageSize,
     }),
-    [debounced, companyFilter, inCampaigns, notInCampaigns, needsEnrichment, page]
+    [debounced, companyFilter, inCampaigns, notInCampaigns, needsEnrichment, customFilters, page]
   );
+
+  // Load custom columns & value counts when exactly one campaign filter is active
+  const singleCampaignId = inCampaigns.length === 1 ? inCampaigns[0] : null;
+
+  const loadCustomColumns = async (cid) => {
+    if (!cid) {
+      setCustomColumns([]);
+      setValueCounts({});
+      setCustomFilters({});
+      return;
+    }
+    try {
+      const [{ data: cols }, { data: counts }] = await Promise.all([
+        api.get(`/campaigns/${cid}/columns`),
+        api.get(`/campaigns/${cid}/cell-value-counts`),
+      ]);
+      setCustomColumns(cols.items || []);
+      setValueCounts(counts.counts || {});
+    } catch (_e) {
+      setCustomColumns([]);
+      setValueCounts({});
+    }
+  };
+
+  useEffect(() => {
+    loadCustomColumns(singleCampaignId);
+  }, [singleCampaignId]);
+
+  const refreshValueCounts = async () => {
+    if (!singleCampaignId) return;
+    try {
+      const { data } = await api.get(`/campaigns/${singleCampaignId}/cell-value-counts`);
+      setValueCounts(data.counts || {});
+    } catch (_e) { /* ignore */ }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -345,7 +389,12 @@ export default function PeoplePage() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {selectedIds.size > 0 && (
+            {singleCampaignId && (
+              <AddColumnButton
+                campaignId={singleCampaignId}
+                onAdded={() => loadCustomColumns(singleCampaignId)}
+              />
+            )}            {selectedIds.size > 0 && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button
