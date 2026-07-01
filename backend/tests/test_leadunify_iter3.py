@@ -46,7 +46,7 @@ def auth_session():
 
 # --------------- Normalize company name (unit) ---------------
 class TestNormalizeCompanyName:
-    def test_normalizes_variants(self):
+    def test_a_and_d_mortgage_variants(self):
         from dedup import normalize_company_name
         assert (
             normalize_company_name("A and D Mortgage LLC")
@@ -55,11 +55,25 @@ class TestNormalizeCompanyName:
             == "a and d mortgage"
         )
 
+    def test_texas_bank_variants(self):
+        from dedup import normalize_company_name
+        assert normalize_company_name("Texas Bank") == "texas bank"
+        assert normalize_company_name("Texas Bank Pvt Ltd") == "texas bank"
+        assert normalize_company_name("Texas Bank Financial") == "texas bank"
+
+    def test_targeted_expected_outputs(self):
+        from dedup import normalize_company_name
+        assert normalize_company_name("HDFC Bank") == "hdfc bank"
+        assert normalize_company_name("Wells Fargo Holdings") == "wells fargo"
+        assert normalize_company_name("Rocket Financial") == "rocket"
+        assert normalize_company_name("FinTech Forward") == "fintech forward"
+        assert normalize_company_name("BrokerHub") == "brokerhub"
+
     def test_fallback_when_stripping_empties(self):
         from dedup import normalize_company_name
-        # "Company Inc" -> "" after stripping. Falls back to "company"
+        # "Company Inc" -> both stripped -> fallback to lower-cased original
         result = normalize_company_name("Company Inc")
-        assert result and result != ""
+        assert result == "company inc"
 
 
 # --------------- Seed baseline ---------------

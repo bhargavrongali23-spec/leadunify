@@ -76,13 +76,19 @@ _COMPANY_STOP_WORDS = [
     "holdings", "holding", "group", "inc",
 ]
 
-# We also strip industry words when they appear at the *end* — e.g.
-# "Texas Bank Financial" should match "Texas Bank" — but NOT when they are
-# core to the name, so we only strip trailing tokens.
+# We also strip a small set of generic corporate flavour words when they
+# appear at the END of a name — e.g. "Texas Bank Financial" should collapse
+# to "Texas Bank". We deliberately keep this list conservative to avoid
+# stripping core-identity words. In particular, industry nouns that often
+# encode the actual line-of-business (mortgage, capital, partners, etc.)
+# are NOT included here.
 _TRAILING_INDUSTRY_TOKENS = {
-    "financial", "financials", "finance", "lending", "loans", "loan",
-    "mortgage", "mortgages", "capital", "partners", "solutions", "services",
-    "advisors", "consulting",
+    "financial", "financials", "finance",
+    "holdings", "holding",
+    "group",
+    "international",
+    "worldwide",
+    "global",
 }
 
 

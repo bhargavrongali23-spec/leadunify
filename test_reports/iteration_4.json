@@ -1,0 +1,38 @@
+{
+  "summary": "Iteration-4 targeted re-test of normalize_company_name after removing over-aggressive trailing-token stripping (mortgage/capital/partners/solutions/services/advisors/consulting/lending/loans/loan). PRIMARY FIX VERIFIED: All 12 canonical outputs from review request now produce the expected value, including the previously-broken 'A and D Mortgage LLC' -> 'a and d mortgage' AND the still-required 'Texas Bank Financial' -> 'texas bank'. All 4 TestNormalizeCompanyName pytest cases pass. All 5 sanity checks pass (auth login+me, /companies/merge-candidates route ordering, /companies/lookup/by-name?name=HDFC%20Bank returns HDFC Bank with people_count=4, Bhargav dedup still returns 1 person with 2 campaigns, seed baseline verified via /api/stats/overview shows 20/17/7). DB baseline restored to exactly 20 people / 17 companies / 7 campaigns / 38 person_campaigns / 1 import batch after test-data cleanup.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "TestSeedBaseline::test_counts (pytest race)", "issue": "When run under xdist parallel workers (pytest.ini forces -n 2 --dist loadscope), TestSeedBaseline occasionally samples people count while TestBulkOps is mid-run and has just inserted 2 test rows -> reports 22 not 20. Not a product bug; sanity check via /api/stats/overview after full test run shows 20/17/7/38/1 correctly."},
+      {"endpoint": "TestMergeCandidatesAndMerge::test_insert_dupes_group_and_merge", "issue": "Pre-existing iter3 design issue (not related to this fix): cannot create 3 sibling companies via public API because get_or_create_company auto-merges by canonical_name. This is the fuzzy-matching feature working as designed; the test's approach of PATCHing 3 seed people to 'TEST_Texas Bank *' names produces 1 company, not 3."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_leadunify_iter3.py",
+    "/app/test_reports/pytest/iter4_results.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: rewrite TestMergeCandidatesAndMerge::test_insert_dupes_group_and_merge to insert 3 sibling companies via direct MongoDB write (bypassing get_or_create_company) so the merge-candidates endpoint gets true end-to-end coverage. Currently it can only cover the 'no-dupes' path via the public API.",
+    "OPTIONAL: make TestSeedBaseline xdist-safe by pinning it to run before TestBulkOps in the same worker (already using loadscope so this is class-level, but bulk-ops is a different class — either move counts assertion inside a fixture that runs at session start, or set a pytest_collection hook)."
+  ],
+  "critical_code_review_comments": [
+    "normalize_company_name is now well-scoped: trailing-industry stripping is conservative (financial/holdings/group/international/worldwide/global) and preserves line-of-business words like mortgage/capital/partners/lending. The 'Company Inc' fallback correctly returns 'company inc' instead of empty. Good fix.",
+    "server.py still 1600+ lines — split into routers eventually (carried over from iter3).",
+    "No DELETE /api/companies/{id} — orphan/test cleanup must go through MongoDB directly. Consider adding for admin use."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_leadunify_iter3.py (expanded TestNormalizeCompanyName from 2 to 4 tests covering all 12 canonical outputs from the review request)"
+  ],
+  "success_rate": {"backend": "100% on primary fix (4/4 normalize + 5/5 sanity). Overall pytest 11/13 — 2 known pre-existing design issues unrelated to this fix.", "frontend": "SKIPPED per review request (frontend was 100% pass in iter3)"},
+  "test_credentials": "admin@leadunify.com / admin123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Cleaned up: removed 1 orphan 'TEST_Texas Bank Ltd' company (0 people, left by test_insert_dupes_group_and_merge), removed 1 orphan 'Example' company (0 people, carried over from iter2), and removed 1 leftover import_batch from bulk-ops test. Final verified state via /api/stats/overview and direct Mongo counts: 20 people / 17 companies / 7 campaigns / 38 person_campaigns / 1 import batch (seed only).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "The normalize_company_name fix is verified working for all 12 spec cases. The 2 failing pytest cases (test_insert_dupes_group_and_merge and TestSeedBaseline race under xdist) are documented pre-existing design issues, not product bugs. To exercise the merge-candidates flow end-to-end, tests must insert companies via direct pymongo/motor rather than through PATCH-on-person (which auto-merges).",
+  "rca of the issue": "PRIMARY FIX RCA: iter3 report identified that _TRAILING_INDUSTRY_TOKENS was over-aggressive — stripping 'mortgage' collapsed 'A and D Mortgage' -> 'a and d', which would over-merge with any 'A and D' company. Fix removed mortgage/capital/partners/solutions/services/advisors/consulting/lending/loans/loan from the trailing-strip set, keeping only truly generic corporate flavour words (financial/holdings/group/international/worldwide/global). Verified: 'A and D Mortgage LLC' now -> 'a and d mortgage' (preserving line-of-business identity), while 'Texas Bank Financial' still -> 'texas bank' (financial correctly stripped as generic). 'Company Inc' -> 'company inc' via fallback path when suffix-stripping empties the name. Fix is minimal, targeted, and does not regress any of the 12 expected outputs from the spec."
+}
