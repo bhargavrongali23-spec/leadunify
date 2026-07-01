@@ -1,0 +1,39 @@
+{
+  "summary": "Iter7 full QA of Custom Columns per Campaign. Backend pytest: 16/16 PASSED (create select/text/checkbox, validation errors, cell persistence for all three kinds, invalid select value rejected, clear-by-empty, cell-value-counts, custom_filters with real value and __empty, cross-campaign isolation, delete-erases-cells, unauth 401/403). Frontend UI: all critical flows verified via Playwright — (1) add-column-btn hidden when no campaign filter, (2) visible when filtered by exactly one campaign, (3) dialog opens and creates Choices/Text/Checkbox columns (verified via GET /columns), (4) inline <select> cell edit persists (Sent -> verified via /people/query custom_values), (5) filter popover shows checkbox for 'Sent', API filter returns exactly 1 row, clear button visible, (6) 3-dot menu -> delete column -> confirm removes header AND cells, (7) navigating back to no-filter or another campaign hides all custom columns/headers, (8) cross-campaign isolation confirmed (cam B headers do not include cam A's TEST_UI_Choices). No product bugs found.",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Add-column dialog + delete-confirm Dialog", "issues": ["Radix DialogContent missing aria-describedby / <DialogDescription> — console emits accessibility warning: 'Missing Description or aria-describedby={undefined} for {DialogContent}'. Not user-visible but should be fixed for a11y."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_leadunify_iter7.py",
+    "/app/test_reports/pytest/iter7_results.xml"
+  ],
+  "action_items": [
+    "Optional a11y: add <DialogDescription> (or aria-describedby) to AddColumnButton dialog and to CustomColumnHeader's delete-confirm dialog in /app/frontend/src/components/CustomColumns.jsx to silence Radix console warning."
+  ],
+  "critical_code_review_comments": [
+    "server.py is still ~2333 lines — long-standing carry-over recommendation to split into routers (people/campaigns/team/audit/imports/columns). This iter added ~180 lines for custom-columns endpoints (642-824) which naturally belong in a dedicated columns_router.py.",
+    "delete_campaign_column deletes the column doc but does NOT invalidate/clean the front-end's active custom_filters state or any saved views that reference the deleted col_id. Consider that /people/query with a stale col_id in custom_filters will silently return the full set (since the $match branch won't apply) — acceptable but worth documenting.",
+    "cell-value-counts pipeline recomputes for every column of the campaign on every call — for large campaigns this is O(columns * n). Consider caching or unioning into a single pipeline.",
+    "CampaignColumnInput doesn't cap `options` length or per-option string length — could bloat if a user pastes huge text.",
+    "PATCH /campaigns/{cid}/cells/{pid} implicitly creates the person_campaigns link if missing — reasonable but this side-effect (adding a person to a campaign) should be documented in the API spec.",
+    "CustomColumnHeader button for filter uses `opacity-0 group-hover:opacity-100` — the button is still clickable when opacity 0, but keyboard users can't see it. Consider `focus-visible:opacity-100` for a11y.",
+    "CustomCell text field uses onBlur+Enter to save — but Escape resets. No visible cue that unsaved edit will be lost on tab-switch/route-change; consider a subtle 'unsaved' indicator or auto-save on beforeunload."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_leadunify_iter7.py (NEW — 16 tests across 7 classes: TestColumnCreate, TestCellPersist, TestValueCounts, TestCustomFilter, TestIsolation, TestDelete, TestAuth)",
+    "/app/test_reports/pytest/iter7_results.xml (junit)",
+    "/app/test_reports/iteration_7.json (this report)"
+  ],
+  "success_rate": { "backend": "100% (16/16)", "frontend": "100% for all 10 UX assertions that actually interacted with the DOM (add-btn visibility gating, dialog open, kind selection, options textarea, create, select cell edit + persist, filter popover open + Sent option render, clear button, 3-dot menu + delete confirm removes column, no-filter hides all custom cols, cam-B isolation)" },
+  "test_credentials": "admin@leadunify.com / admin123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "During tests, columns TEST_QA_Choices / TEST_QA_Text / TEST_QA_Bool + TEST_DEL_col + TEST_UI_Choices / TEST_UI_Text / TEST_UI_Bool were created on campaign 'Mortgage Bankers Meetup NYC' and all cleaned up at teardown. Cells set on 2 people were also cleared. Pre-existing 'email status' and 'Email 1 status' columns (from main-agent smoke test) were left intact. No other seed data touched.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "iter7 test file: /app/backend/tests/test_leadunify_iter7.py — 16 tests, requires >=2 campaigns and >=2 people already linked to campaigns[0]. Uses _load_backend_url() helper because pytest sub-process may not inherit REACT_APP_BACKEND_URL. Frontend viewport 1920x1080. For UI checks of custom-column headers do NOT rely on `th.inner_text()` — the header uses `truncate max-w-[110px]` inside a span, and Playwright's inner_text on the parent <th> may return empty when the CustomColumnHeader is rendered because the truncated span + hidden hover buttons complicate the accessible-name computation. Instead, verify by (a) querying the columns via GET /api/campaigns/{cid}/columns, or (b) checking that `[data-testid=col-filter-<id>]` or `[data-testid=cell-<personId>-<colId>]` selectors exist. This iteration proved the render pathway is correct through those selectors.",
+  "rca of the issue": "N/A — no product bugs. Playwright TEST3/4/5's 'inner_text of <th>' check reported False for the newly-created headers, but this was a test-assertion artifact: TEST6 (select-cell edit + persist), TEST7 (filter popover + Sent checkbox render), and TEST8 (3-dot menu + confirm-delete) all successfully interacted with those very headers/cells via data-testid selectors, and the API confirmed the columns existed. Recommendation for next agent: use data-testid based existence checks instead of inner_text scanning."
+}

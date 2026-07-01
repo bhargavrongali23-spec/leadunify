@@ -394,7 +394,8 @@ export default function PeoplePage() {
                 campaignId={singleCampaignId}
                 onAdded={() => loadCustomColumns(singleCampaignId)}
               />
-            )}            {selectedIds.size > 0 && (
+            )}
+            {selectedIds.size > 0 && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button
@@ -746,6 +747,30 @@ export default function PeoplePage() {
                 <th className="px-3 py-2.5 text-left font-semibold w-8">LI</th>
                 <th className="px-3 py-2.5 text-left font-semibold">Campaigns</th>
                 <th className="px-3 py-2.5 text-left font-semibold w-[220px]">Notes</th>
+                {customColumns.map((col) => (
+                  <th
+                    key={col.id}
+                    className="px-3 py-2.5 text-left font-semibold whitespace-nowrap"
+                    data-testid={`col-header-${col.id}`}
+                  >
+                    <CustomColumnHeader
+                      campaignId={singleCampaignId}
+                      column={col}
+                      valueCounts={valueCounts[col.id] || []}
+                      activeValues={customFilters[col.id] || []}
+                      onFilterChange={(vals) => {
+                        setCustomFilters((prev) => {
+                          const next = { ...prev };
+                          if (!vals || vals.length === 0) delete next[col.id];
+                          else next[col.id] = vals;
+                          return next;
+                        });
+                        setPage(1);
+                      }}
+                      onDeleted={() => loadCustomColumns(singleCampaignId)}
+                    />
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -756,6 +781,9 @@ export default function PeoplePage() {
                   selected={selectedIds.has(p.id)}
                   onToggleSelect={() => toggleSelect(p.id)}
                   onNotesSaved={(n) => updateRowNotes(p.id, n)}
+                  customColumns={customColumns}
+                  singleCampaignId={singleCampaignId}
+                  onCustomSaved={refreshValueCounts}
                 />
               ))}
             </tbody>
@@ -846,7 +874,11 @@ export default function PeoplePage() {
   );
 }
 
-function PersonRow({ person, selected, onToggleSelect, onNotesSaved }) {
+function PersonRow({ person, selected, onToggleSelect, onNotesSaved, customColumns = [], singleCampaignId, onCustomSaved }) {
+  const [customValues, setCustomValues] = useState(person.custom_values || {});
+  useEffect(() => {
+    setCustomValues(person.custom_values || {});
+  }, [person.custom_values, person.id]);
   return (
     <tr
       className={`row-hover cursor-pointer ${selected ? "bg-indigo-50/40" : ""}`}
@@ -955,6 +987,33 @@ function PersonRow({ person, selected, onToggleSelect, onNotesSaved }) {
           testId={`notes-${person.id}`}
         />
       </td>
+      {customColumns.map((col) => (
+        <td
+          key={col.id}
+          className="px-3 py-2.5 align-top whitespace-nowrap"
+          onClick={(e) => e.stopPropagation()}
+          data-testid={`cell-td-${person.id}-${col.id}`}
+        >
+          <CustomCell
+            campaignId={singleCampaignId}
+            personId={person.id}
+            column={col}
+            value={customValues[col.id]}
+            onSaved={(newVal) => {
+              setCustomValues((prev) => {
+                const next = { ...prev };
+                if (newVal === null || newVal === "" || newVal === undefined) {
+                  delete next[col.id];
+                } else {
+                  next[col.id] = newVal;
+                }
+                return next;
+              });
+              onCustomSaved?.();
+            }}
+          />
+        </td>
+      ))}
     </tr>
   );
 }
