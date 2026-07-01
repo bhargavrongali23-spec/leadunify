@@ -26,13 +26,14 @@ export default function ChatPanel({ open, onClose, onOpenPerson }) {
 
   const send = async (text) => {
     if (!text.trim()) return;
-    const userMsg = { role: "user", content: text };
+    const userMsg = { id: `u-${Date.now()}`, role: "user", content: text };
     setHistory((h) => [...h, userMsg]);
     setInput("");
     setLoading(true);
     try {
       const { data } = await api.post("/chat/query", { message: text });
       const assistantMsg = {
+        id: `a-${Date.now()}`,
         role: "assistant",
         content: data.answer,
         results: data.results,
@@ -43,7 +44,11 @@ export default function ChatPanel({ open, onClose, onOpenPerson }) {
     } catch (e) {
       setHistory((h) => [
         ...h,
-        { role: "assistant", content: "Sorry, I couldn't process that request." },
+        {
+          id: `err-${Date.now()}`,
+          role: "assistant",
+          content: "Sorry, I couldn't process that request.",
+        },
       ]);
     } finally {
       setLoading(false);
@@ -109,7 +114,7 @@ export default function ChatPanel({ open, onClose, onOpenPerson }) {
 
           {history.map((m, i) => (
             <MessageBubble
-              key={i}
+              key={m.id || `msg-${i}`}
               message={m}
               onOpenPerson={(id) => {
                 onOpenPerson?.(id);

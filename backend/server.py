@@ -172,6 +172,57 @@ async def _log_audit(user: dict, action: str, detail: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Role helpers — 3-tier system: owner (workspace creator, unique) > admin > member.
+# `is_privileged` means "admin OR owner" — most existing admin gates should now
+# accept either. Password reset for OTHER users is owner-only.
+# ---------------------------------------------------------------------------
+def is_privileged(user: dict) -> bool:
+    """Owner or admin — has full CRUD on data."""
+    return user.get("role") in ("owner", "admin")
+
+
+def is_owner(user: dict) -> bool:
+    return user.get("role") == "owner"
+
+
+async def _cascade_cleanup_after_people_delete(deleted_ids: List[str]) -> dict:
+    """Whenever people are removed we also purge every dependent record so the
+    directory doesn't leak orphan companies, dead duplicate flags, or dangling
+    campaign links. Safe to call with an empty list — it's a no-op."""
+    if not deleted_ids:
+        return {"person_campaigns": 0, "duplicate_flags": 0, "companies_removed": 0}
+    pc = await db.person_campaigns.delete_many({"person_id": {"$in": deleted_ids}})
+    df = await db.duplicate_flags.delete_many(
+        {"$or": [
+            {"existing_person_id": {"$in": deleted_ids}},
+            {"candidate_person_id": {"$in": deleted_ids}},
+        ]}
+    )
+    # Delete companies that no longer have any linked people.
+    all_company_ids = [str(c["_id"]) async for c in db.companies.find({}, {"_id": 1})]
+    if all_company_ids:
+        # Find company_ids still in use.
+        in_use = set()
+        async for d in db.people.find(
+            {"company_id": {"$in": all_company_ids}}, {"company_id": 1}
+        ):
+            if d.get("company_id"):
+                in_use.add(d["company_id"])
+        orphan_ids = [ObjectId(cid) for cid in all_company_ids if cid not in in_use and ObjectId.is_valid(cid)]
+        companies_removed = 0
+        if orphan_ids:
+            r = await db.companies.delete_many({"_id": {"$in": orphan_ids}})
+            companies_removed = r.deleted_count
+    else:
+        companies_removed = 0
+    return {
+        "person_campaigns": pc.deleted_count,
+        "duplicate_flags": df.deleted_count,
+        "companies_removed": companies_removed,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Startup — indexes, admin seed, demo data
 # ---------------------------------------------------------------------------
 async def _startup() -> None:
@@ -217,15 +268,20 @@ async def _startup() -> None:
             "email": admin_email,
             "password_hash": hash_password(admin_password),
             "name": "Admin",
-            "role": "admin",
+            "role": "owner",
             "created_at": utc_now_iso(),
         })
-        logger.info("Seeded admin user")
-    elif not verify_password(admin_password, existing["password_hash"]):
-        await db.users.update_one(
-            {"email": admin_email},
-            {"$set": {"password_hash": hash_password(admin_password)}},
-        )
+        logger.info("Seeded owner user")
+    else:
+        # Ensure the seeded admin account is always the owner (idempotent upgrade
+        # from earlier "admin" role deploys).
+        updates = {}
+        if existing.get("role") != "owner":
+            updates["role"] = "owner"
+        if not verify_password(admin_password, existing["password_hash"]):
+            updates["password_hash"] = hash_password(admin_password)
+        if updates:
+            await db.users.update_one({"email": admin_email}, {"$set": updates})
 
     # Back-fill canonical_name for pre-existing companies (safe to run every startup)
     from dedup import normalize_company_name
@@ -234,12 +290,12 @@ async def _startup() -> None:
         if canon:
             await db.companies.update_one({"_id": c["_id"]}, {"$set": {"canonical_name": canon}})
 
-    # Ensure the admin owns any legacy campaign that has no owner_id
-    admin = await db.users.find_one({"role": "admin"}, {"_id": 1})
-    if admin:
+    # Ensure the owner owns any legacy campaign that has no owner_id
+    owner = await db.users.find_one({"role": "owner"}, {"_id": 1})
+    if owner:
         await db.campaigns.update_many(
             {"$or": [{"owner_id": None}, {"owner_id": {"$exists": False}}]},
-            {"$set": {"owner_id": str(admin["_id"]), "shared_with_user_ids": []}},
+            {"$set": {"owner_id": str(owner["_id"]), "shared_with_user_ids": []}},
         )
 
     # seed demo data (only if empty)
@@ -416,7 +472,7 @@ class CompanyMergeInput(BaseModel):
 
 @api.post("/companies/merge")
 async def merge_companies(payload: CompanyMergeInput, user: dict = Depends(get_current_user)):
-    if user.get("role") != "admin":
+    if not is_privileged(user):
         raise HTTPException(status_code=403, detail="Admin only")
     try:
         keep_oid = ObjectId(payload.keep_company_id)
@@ -500,6 +556,32 @@ async def update_company(
     return serialize_doc(doc)
 
 
+@api.delete("/companies/{company_id}")
+async def delete_company(company_id: str, user: dict = Depends(get_current_user)):
+    """Delete a company. If people are still linked, they are unlinked (their
+    `company_id` and `company_name` cleared) — the people themselves stay."""
+    if not is_privileged(user):
+        raise HTTPException(status_code=403, detail="Admin only")
+    try:
+        oid = ObjectId(company_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid company id")
+    doc = await db.companies.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Company not found")
+    unlinked = await db.people.update_many(
+        {"company_id": company_id},
+        {"$set": {"company_id": None, "company_name": None, "updated_at": utc_now_iso()}},
+    )
+    await db.companies.delete_one({"_id": oid})
+    await _log_audit(user, "delete_company", {
+        "company_id": company_id,
+        "company_name": doc.get("name"),
+        "people_unlinked": unlinked.modified_count,
+    })
+    return {"ok": True, "people_unlinked": unlinked.modified_count}
+
+
 # ---------------------------------------------------------------------------
 # Campaigns
 # ---------------------------------------------------------------------------
@@ -517,7 +599,7 @@ async def list_campaigns(scope: str = "mine", user: dict = Depends(get_current_u
     scope='mine' (default) — admins see all, members see owned + shared.
     scope='all' — admin sees all; members also see all so they can request access.
     """
-    is_admin = user.get("role") == "admin"
+    is_admin = is_privileged(user)
     uid = str(user["_id"])
     query: dict = {}
     if not is_admin and scope != "all":
@@ -626,15 +708,22 @@ async def update_campaign(
 
 @api.delete("/campaigns/{campaign_id}")
 async def delete_campaign(campaign_id: str, user: dict = Depends(get_current_user)):
-    if user.get("role") != "admin":
+    if not is_privileged(user):
         raise HTTPException(status_code=403, detail="Admin only")
     try:
         oid = ObjectId(campaign_id)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid campaign id")
+    doc = await db.campaigns.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Campaign not found")
     await db.campaigns.delete_one({"_id": oid})
     await db.person_campaigns.delete_many({"campaign_id": campaign_id})
     await db.campaign_columns.delete_many({"campaign_id": campaign_id})
+    await _log_audit(user, "delete_campaign", {
+        "campaign_id": campaign_id,
+        "campaign_name": doc.get("name"),
+    })
     return {"ok": True}
 
 
@@ -669,7 +758,7 @@ async def _assert_campaign_access(campaign_id: str, user: dict) -> dict:
     if not camp:
         raise HTTPException(status_code=404, detail="Campaign not found")
     uid = str(user["_id"])
-    is_admin = user.get("role") == "admin"
+    is_admin = is_privileged(user)
     if not is_admin and camp.get("owner_id") not in (None, uid) and uid not in (camp.get("shared_with_user_ids") or []):
         raise HTTPException(status_code=403, detail="You don't have access to this campaign")
     return camp
@@ -1110,7 +1199,7 @@ class MergeInput(BaseModel):
 
 @api.post("/people/merge")
 async def merge_people(payload: MergeInput, user: dict = Depends(get_current_user)):
-    if user.get("role") != "admin":
+    if not is_privileged(user):
         raise HTTPException(status_code=403, detail="Admin only")
     try:
         keep_oid = ObjectId(payload.keep_person_id)
@@ -1185,15 +1274,15 @@ async def merge_people(payload: MergeInput, user: dict = Depends(get_current_use
 
 @api.delete("/people/{person_id}")
 async def delete_person(person_id: str, user: dict = Depends(get_current_user)):
-    if user.get("role") != "admin":
+    if not is_privileged(user):
         raise HTTPException(status_code=403, detail="Admin only")
     try:
         oid = ObjectId(person_id)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid person id")
     await db.people.delete_one({"_id": oid})
-    await db.person_campaigns.delete_many({"person_id": person_id})
-    return {"ok": True}
+    cleanup = await _cascade_cleanup_after_people_delete([person_id])
+    return {"ok": True, "cleanup": cleanup}
 
 
 class BulkDeleteInput(BaseModel):
@@ -1239,14 +1328,14 @@ async def unflag_person_for_enrichment(person_id: str, user: dict = Depends(get_
 @api.post("/people/bulk-delete")
 async def bulk_delete_people(payload: BulkDeleteInput, user: dict = Depends(get_current_user)):
     """Completely remove the selected people (from every campaign, every list)."""
-    if user.get("role") != "admin":
+    if not is_privileged(user):
         raise HTTPException(status_code=403, detail="Admin only")
     if not payload.ids:
         return {"ok": True, "deleted": 0}
     oids = [ObjectId(i) for i in payload.ids if ObjectId.is_valid(i)]
     result = await db.people.delete_many({"_id": {"$in": oids}})
-    await db.person_campaigns.delete_many({"person_id": {"$in": payload.ids}})
-    return {"ok": True, "deleted": result.deleted_count}
+    cleanup = await _cascade_cleanup_after_people_delete(payload.ids)
+    return {"ok": True, "deleted": result.deleted_count, "cleanup": cleanup}
 
 
 class BulkRemoveFromCampaignInput(BaseModel):
@@ -1291,7 +1380,7 @@ def _is_non_empty_people_filter(payload_dict: dict) -> bool:
 async def delete_people_by_filter(payload: PeopleQuery, user: dict = Depends(get_current_user)):
     """Delete EVERY person matching the given filter (all pages, not just
     visible). Admin only. Returns how many were removed."""
-    if user.get("role") != "admin":
+    if not is_privileged(user):
         raise HTTPException(status_code=403, detail="Admin only")
     if not _is_non_empty_people_filter(payload.model_dump()):
         raise HTTPException(
@@ -1307,8 +1396,8 @@ async def delete_people_by_filter(payload: PeopleQuery, user: dict = Depends(get
         return {"ok": True, "deleted": 0}
     oids = [ObjectId(i) for i in ids if ObjectId.is_valid(i)]
     result = await db.people.delete_many({"_id": {"$in": oids}})
-    await db.person_campaigns.delete_many({"person_id": {"$in": ids}})
-    return {"ok": True, "deleted": result.deleted_count}
+    cleanup = await _cascade_cleanup_after_people_delete(ids)
+    return {"ok": True, "deleted": result.deleted_count, "cleanup": cleanup}
 
 
 class RemoveByFilterFromCampaignInput(PeopleQuery):
@@ -1329,7 +1418,7 @@ async def remove_by_filter_from_campaign(
     camp = await db.campaigns.find_one({"_id": ObjectId(payload.campaign_id)})
     if not camp:
         raise HTTPException(status_code=404, detail="Campaign not found")
-    if user.get("role") != "admin" and camp.get("owner_id") != str(user["_id"]):
+    if not is_privileged(user) and camp.get("owner_id") != str(user["_id"]):
         raise HTTPException(status_code=403, detail="Only the campaign owner or an admin can bulk-remove")
     filter_dict = payload.model_dump(exclude={"campaign_id"})
     if not _is_non_empty_people_filter(filter_dict):
@@ -1670,23 +1759,36 @@ async def export_people(payload: PeopleQuery, format: str = "csv", ids: Optional
 # ---------------------------------------------------------------------------
 @api.get("/duplicates")
 async def list_duplicates(_: dict = Depends(get_current_user)):
+    """Return pending duplicate flags. Self-heals by dropping any flag whose
+    existing OR candidate person no longer exists (avoids stale blank profile
+    reviews after bulk deletes)."""
     cursor = db.duplicate_flags.find({"status": "pending"}).sort("created_at", -1).limit(200)
     items = []
+    stale_ids: list = []
     async for d in cursor:
         s = serialize_doc(d)
+        existing = None
         try:
             existing = await db.people.find_one({"_id": ObjectId(d["existing_person_id"])})
-            s["existing_person"] = serialize_doc(existing) if existing else None
         except Exception:
-            s["existing_person"] = None
+            pass
+        s["existing_person"] = serialize_doc(existing) if existing else None
+        cand = None
         cand_id = d.get("candidate_person_id")
         if cand_id:
             try:
                 cand = await db.people.find_one({"_id": ObjectId(cand_id)})
-                s["candidate_person"] = serialize_doc(cand) if cand else None
             except Exception:
-                s["candidate_person"] = None
+                pass
+            s["candidate_person"] = serialize_doc(cand) if cand else None
+        # A flag is "stale" if the existing person is gone, or if the flag
+        # references a candidate that no longer exists.
+        if not existing or (cand_id and not cand):
+            stale_ids.append(d["_id"])
+            continue
         items.append(s)
+    if stale_ids:
+        await db.duplicate_flags.delete_many({"_id": {"$in": stale_ids}})
     return {"items": items}
 
 
@@ -2099,24 +2201,29 @@ async def sheets_preview(payload: SheetsImportPreview, user: dict = Depends(get_
 
 
 # ---------------------------------------------------------------------------
-# Team / users management (admin only)
+# Team / users management
 # ---------------------------------------------------------------------------
 def _admin_only(user: dict) -> None:
-    if user.get("role") != "admin":
+    if not is_privileged(user):
         raise HTTPException(status_code=403, detail="Admin only")
+
+
+def _owner_only(user: dict) -> None:
+    if not is_owner(user):
+        raise HTTPException(status_code=403, detail="Only the workspace owner can do this")
 
 
 class InviteUserInput(BaseModel):
     email: str
     name: Optional[str] = None
-    role: str = "member"  # "admin" | "member"
+    role: str = "member"  # "admin" | "member" — "owner" is reserved for the seeded workspace owner
     password: Optional[str] = None  # optional; auto-generated if omitted
 
 
 class UserPatchInput(BaseModel):
     name: Optional[str] = None
     role: Optional[str] = None
-    password: Optional[str] = None  # admin reset
+    password: Optional[str] = None  # only owner can reset another user's password
 
 
 @api.get("/users")
@@ -2176,14 +2283,37 @@ async def update_user(user_id: str, payload: UserPatchInput, user: dict = Depend
         oid = ObjectId(user_id)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid user id")
+    # Look up the target user so we can enforce owner-only rules against them
+    target = await db.users.find_one({"_id": oid})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    target_is_owner = target.get("role") == "owner"
+    caller_is_owner = is_owner(user)
+    caller_id = str(user["_id"])
+    is_self_update = user_id == caller_id
+
+    # Nobody except the owner themselves can modify the owner account.
+    if target_is_owner and not (caller_is_owner and is_self_update):
+        raise HTTPException(status_code=403, detail="Only the owner can modify the owner account")
+
     updates: dict = {}
     if payload.name is not None:
         updates["name"] = payload.name.strip()
     if payload.role is not None:
         if payload.role not in ("admin", "member"):
             raise HTTPException(status_code=400, detail="Role must be admin or member")
+        # Only the owner may change roles. Admins cannot promote/demote.
+        if not caller_is_owner:
+            raise HTTPException(status_code=403, detail="Only the workspace owner can change roles")
         updates["role"] = payload.role
     if payload.password:
+        # Resetting your own password is always allowed.
+        # Resetting someone else's password is owner-only.
+        if not is_self_update and not caller_is_owner:
+            raise HTTPException(
+                status_code=403,
+                detail="Only the workspace owner can reset another user's password",
+            )
         updates["password_hash"] = hash_password(payload.password)
     if not updates:
         return {"ok": True}
@@ -2200,10 +2330,15 @@ async def delete_user(user_id: str, user: dict = Depends(get_current_user)):
         oid = ObjectId(user_id)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid user id")
+    target = await db.users.find_one({"_id": oid})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+    if target.get("role") == "owner":
+        raise HTTPException(status_code=403, detail="Cannot delete the workspace owner")
     await db.users.delete_one({"_id": oid})
     # Remove the user's shares
     await db.campaigns.update_many({}, {"$pull": {"shared_with_user_ids": user_id}})
-    # Reassign owned campaigns to admin (current caller) — safer than deleting
+    # Reassign owned campaigns to caller — safer than deleting
     await db.campaigns.update_many({"owner_id": user_id}, {"$set": {"owner_id": str(user["_id"])}})
     await db.access_requests.delete_many({"user_id": user_id})
     return {"ok": True}
@@ -2228,7 +2363,7 @@ async def share_campaign(
     if not camp:
         raise HTTPException(status_code=404, detail="Campaign not found")
     uid = str(user["_id"])
-    is_admin = user.get("role") == "admin"
+    is_admin = is_privileged(user)
     if not is_admin and camp.get("owner_id") != uid:
         raise HTTPException(status_code=403, detail="Only the owner or an admin can share this campaign")
 
@@ -2266,7 +2401,7 @@ async def bulk_share_campaigns(
     Only campaigns the caller owns (or all, if admin) will be touched. Skipped
     campaigns are reported back so the UI can surface which ones the user
     doesn't have permission to share."""
-    is_admin = user.get("role") == "admin"
+    is_admin = is_privileged(user)
     uid = str(user["_id"])
 
     # dedupe + validate user ids exist
@@ -2311,7 +2446,7 @@ async def unshare_campaign(
     camp = await db.campaigns.find_one({"_id": oid})
     if not camp:
         raise HTTPException(status_code=404, detail="Campaign not found")
-    if user.get("role") != "admin" and camp.get("owner_id") != str(user["_id"]):
+    if not is_privileged(user) and camp.get("owner_id") != str(user["_id"]):
         raise HTTPException(status_code=403, detail="Only the owner or admin can un-share")
     await db.campaigns.update_one({"_id": oid}, {"$pull": {"shared_with_user_ids": payload.user_id}})
     return {"ok": True}
@@ -2328,7 +2463,7 @@ async def request_campaign_access(campaign_id: str, user: dict = Depends(get_cur
         raise HTTPException(status_code=404, detail="Campaign not found")
     uid = str(user["_id"])
     # Already has access
-    if user.get("role") == "admin" or camp.get("owner_id") == uid or uid in (camp.get("shared_with_user_ids") or []):
+    if is_privileged(user) or camp.get("owner_id") == uid or uid in (camp.get("shared_with_user_ids") or []):
         return {"ok": True, "already_has_access": True}
     # Already requested and pending
     existing = await db.access_requests.find_one({
@@ -2352,7 +2487,7 @@ async def request_campaign_access(campaign_id: str, user: dict = Depends(get_cur
 async def list_access_requests(user: dict = Depends(get_current_user)):
     """Admins see all pending requests. Non-admin owners see requests for
     campaigns they own."""
-    is_admin = user.get("role") == "admin"
+    is_admin = is_privileged(user)
     uid = str(user["_id"])
     if is_admin:
         query = {"status": "pending"}
@@ -2382,7 +2517,7 @@ async def action_access_request(
     req = await db.access_requests.find_one({"_id": oid})
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
-    is_admin = user.get("role") == "admin"
+    is_admin = is_privileged(user)
     campaign_id = req["campaign_id"]
     camp = await db.campaigns.find_one({"_id": ObjectId(campaign_id)})
     if not camp:

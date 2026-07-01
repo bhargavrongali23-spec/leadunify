@@ -30,6 +30,7 @@ import {
   Check,
   X,
   Loader2,
+  Trash2,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
@@ -38,7 +39,7 @@ import { useAuth } from "@/context/AuthContext";
 export default function CampaignsPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const isAdmin = user?.role === "admin";
+  const isAdmin = user?.role === "admin" || user?.role === "owner";
   const [mine, setMine] = useState([]);
   const [all, setAll] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -52,6 +53,8 @@ export default function CampaignsPage() {
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [bulkShareOpen, setBulkShareOpen] = useState(false);
   const [bulkShareUserIds, setBulkShareUserIds] = useState([]);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleting, setDeleting] = useState(false);
   const [requests, setRequests] = useState([]);
   const [myRequests, setMyRequests] = useState([]);
   const [requestedIds, setRequestedIds] = useState(new Set());
@@ -180,6 +183,21 @@ export default function CampaignsPage() {
     }
   };
 
+  const deleteCampaign = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      await api.delete(`/campaigns/${deleteTarget.id}`);
+      toast.success(`Deleted "${deleteTarget.name}"`);
+      setDeleteTarget(null);
+      load();
+    } catch (e) {
+      toast.error(formatApiErrorDetail(e.response?.data?.detail) || "Delete failed");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const actOnRequest = async (id, action) => {
     try {
       await api.post(`/access-requests/${id}/action`, { action });
@@ -268,6 +286,19 @@ export default function CampaignsPage() {
               data-testid={`share-campaign-${c.id}`}
             >
               <Share2 className="w-3 h-3 mr-1" /> Share
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-xs h-7 text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
+              onClick={(e) => {
+                e.stopPropagation();
+                setDeleteTarget(c);
+              }}
+              data-testid={`delete-campaign-${c.id}`}
+              title="Delete campaign"
+            >
+              <Trash2 className="w-3 h-3 mr-1" /> Delete
             </Button>
           </div>
         )}
@@ -679,6 +710,62 @@ export default function CampaignsPage() {
             >
               <Share2 className="w-3.5 h-3.5 mr-1.5" />
               Share {selectedIds.size} × {bulkShareUserIds.length}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete campaign confirm dialog */}
+      <Dialog
+        open={!!deleteTarget}
+        onOpenChange={(o) => !o && setDeleteTarget(null)}
+      >
+        <DialogContent data-testid="delete-campaign-dialog">
+          <DialogHeader>
+            <DialogTitle>Delete &ldquo;{deleteTarget?.name}&rdquo;?</DialogTitle>
+            <DialogDescription>
+              {deleteTarget?.people_count > 0 ? (
+                <>
+                  This will remove{" "}
+                  <span className="font-medium text-slate-800">
+                    {deleteTarget.people_count} contact
+                    {deleteTarget.people_count === 1 ? "" : "s"}
+                  </span>{" "}
+                  from this campaign (they stay in your directory and in any
+                  other campaigns they belong to) and delete any custom columns
+                  you&apos;ve set up here. The campaign itself will be permanently
+                  removed. This cannot be undone.
+                </>
+              ) : (
+                <>
+                  This campaign is empty. It will be permanently removed along
+                  with any custom columns. This cannot be undone.
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteTarget(null)}
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={deleteCampaign}
+              disabled={deleting}
+              className="bg-red-600 hover:bg-red-700 text-white"
+              data-testid="confirm-delete-campaign"
+            >
+              {deleting ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <>
+                  <Trash2 className="w-3.5 h-3.5 mr-1.5" />
+                  Delete
+                </>
+              )}
             </Button>
           </DialogFooter>
         </DialogContent>

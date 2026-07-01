@@ -341,7 +341,10 @@ export default function PersonDetail({ personId, onClose }) {
                 </div>
                 <div className="space-y-0.5">
                   {person.sources.map((s, i) => (
-                    <div key={i} className="text-xs text-slate-500 text-mono truncate">
+                    <div
+                      key={`${s.source_id || s.source_name || "src"}-${i}`}
+                      className="text-xs text-slate-500 text-mono truncate"
+                    >
                       {s.source_name}
                     </div>
                   ))}

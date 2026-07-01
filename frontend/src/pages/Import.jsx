@@ -54,8 +54,10 @@ export default function ImportPage() {
     try {
       const { data } = await api.get("/import/batches");
       setBatches(data.items || []);
-    } catch (_e) {
-      /* ignore */
+    } catch (e) {
+      // Batches list is a secondary panel — log but don't toast so the main
+      // import UX isn't disrupted by a transient GET failure.
+      console.error("Failed to load import batches", e);
     }
   }, []);
 
@@ -478,7 +480,7 @@ function MappingStep({
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {preview.preview_rows.map((r, i) => (
-                  <tr key={i}>
+                  <tr key={`row-${i}-${preview.token || "t"}`}>
                     {preview.headers.map((h) => (
                       <td key={h} className="px-2 py-1 text-slate-700 text-mono truncate max-w-[160px]">
                         {r[h]}

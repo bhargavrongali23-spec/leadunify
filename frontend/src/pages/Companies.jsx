@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
   DialogFooter,
@@ -18,11 +19,15 @@ import {
   Loader2,
   ChevronLeft,
   ChevronRight,
+  Trash2,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
+import { useAuth } from "@/context/AuthContext";
 
 export default function CompaniesPage() {
+  const { user } = useAuth();
+  const isPrivileged = user?.role === "admin" || user?.role === "owner";
   const [q, setQ] = useState("");
   const [data, setData] = useState({ items: [], total: 0 });
   const [loading, setLoading] = useState(true);
@@ -34,6 +39,16 @@ export default function CompaniesPage() {
   const [reviewGroup, setReviewGroup] = useState(null);
   const [keepId, setKeepId] = useState(null);
   const [merging, setMerging] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const reload = () => {
+    setLoading(true);
+    api
+      .get("/companies", { params: { q, page, page_size: pageSize } })
+      .then(({ data }) => setData(data))
+      .finally(() => setLoading(false));
+  };
 
   useEffect(() => {
     setLoading(true);
@@ -48,8 +63,9 @@ export default function CompaniesPage() {
     try {
       const { data } = await api.get("/companies/merge-candidates");
       setMergeGroups(data.groups || []);
-    } catch (_e) {
-      /* ignore */
+    } catch (e) {
+      // Non-blocking — the merge-candidates band is optional UX.
+      console.error("Failed to load merge candidates", e);
     } finally {
       setLoadingCandidates(false);
     }
@@ -92,6 +108,27 @@ export default function CompaniesPage() {
       toast.error(e.response?.data?.detail || "Merge failed");
     } finally {
       setMerging(false);
+    }
+  };
+
+  const deleteCompany = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      const { data: res } = await api.delete(`/companies/${deleteTarget.id}`);
+      toast.success(
+        `Deleted "${deleteTarget.name}"` +
+          (res.people_unlinked
+            ? ` · ${res.people_unlinked} contact${res.people_unlinked === 1 ? "" : "s"} unlinked`
+            : "")
+      );
+      setDeleteTarget(null);
+      reload();
+      loadCandidates();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Delete failed");
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -139,9 +176,11 @@ export default function CompaniesPage() {
               </div>
             </div>
             <div className="space-y-2">
-              {mergeGroups.map((g, i) => (
+              {mergeGroups.map((g, i) => {
+                const groupKey = g.companies.map((c) => c.id).sort().join("|");
+                return (
                 <div
-                  key={i}
+                  key={groupKey}
                   data-testid={`merge-group-${i}`}
                   className="bg-amber-50 border border-amber-200 rounded-md p-3 flex items-center justify-between gap-3"
                 >
@@ -174,7 +213,8 @@ export default function CompaniesPage() {
                     Review
                   </Button>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
@@ -192,14 +232,28 @@ export default function CompaniesPage() {
           <>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
               {data.items.map((c) => (
-                <button
+                <div
                   key={c.id}
                   data-testid={`company-card-${c.id}`}
+                  className="group relative text-left bg-white border border-slate-200 rounded-md p-4 hover:border-indigo-300 hover:shadow-sm transition-all cursor-pointer"
                   onClick={() =>
                     navigate(`/people?company=${encodeURIComponent(c.name)}`)
                   }
-                  className="text-left bg-white border border-slate-200 rounded-md p-4 hover:border-indigo-300 hover:shadow-sm transition-all"
                 >
+                  {isPrivileged && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setDeleteTarget(c);
+                      }}
+                      className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded hover:bg-red-50 text-slate-300 hover:text-red-600"
+                      data-testid={`delete-company-${c.id}`}
+                      title="Delete company"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                   <div className="flex items-start gap-3">
                     <div className="w-9 h-9 rounded-md bg-indigo-50 border border-indigo-100 text-indigo-600 flex items-center justify-center shrink-0">
                       <Building2 className="w-4 h-4" />
@@ -225,7 +279,7 @@ export default function CompaniesPage() {
                       )}
                     </div>
                   </div>
-                </button>
+                </div>
               ))}
             </div>
 
@@ -349,6 +403,61 @@ export default function CompaniesPage() {
                 <>
                   <GitMerge className="w-3.5 h-3.5 mr-1.5" />
                   Merge
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete company confirm dialog */}
+      <Dialog
+        open={!!deleteTarget}
+        onOpenChange={(o) => !o && setDeleteTarget(null)}
+      >
+        <DialogContent data-testid="delete-company-dialog">
+          <DialogHeader>
+            <DialogTitle>Delete &ldquo;{deleteTarget?.name}&rdquo;?</DialogTitle>
+            <DialogDescription>
+              {deleteTarget?.people_count > 0 ? (
+                <>
+                  This company has{" "}
+                  <span className="font-medium text-slate-800">
+                    {deleteTarget.people_count} contact
+                    {deleteTarget.people_count === 1 ? "" : "s"}
+                  </span>{" "}
+                  linked to it. Deleting the company will unlink them (the
+                  contacts themselves stay in your directory but their company
+                  will be blank). You can re-assign them later.
+                </>
+              ) : (
+                <>
+                  This company has no contacts linked. Delete safely — the
+                  company record will be permanently removed.
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteTarget(null)}
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={deleteCompany}
+              disabled={deleting}
+              className="bg-red-600 hover:bg-red-700 text-white"
+              data-testid="confirm-delete-company"
+            >
+              {deleting ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <>
+                  <Trash2 className="w-3.5 h-3.5 mr-1.5" />
+                  Delete
                 </>
               )}
             </Button>

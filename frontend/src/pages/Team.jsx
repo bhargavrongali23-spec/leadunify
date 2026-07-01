@@ -39,7 +39,8 @@ import { Navigate } from "react-router-dom";
 
 export default function TeamPage() {
   const { user } = useAuth();
-  const isAdmin = user?.role === "admin";
+  const isPrivileged = user?.role === "admin" || user?.role === "owner";
+  const isOwner = user?.role === "owner";
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [inviteOpen, setInviteOpen] = useState(false);
@@ -64,26 +65,26 @@ export default function TeamPage() {
   const [loadingAudit, setLoadingAudit] = useState(false);
 
   const loadUsers = async () => {
-    if (!isAdmin) return;
+    if (!isPrivileged) return;
     setLoading(true);
     try {
       const { data } = await api.get("/users");
       setUsers(data.items || []);
-    } catch (_e) {
-      /* ignore */
+    } catch (e) {
+      console.error("Failed to load users", e);
     } finally {
       setLoading(false);
     }
   };
 
   const loadAudit = async () => {
-    if (!isAdmin) return;
+    if (!isPrivileged) return;
     setLoadingAudit(true);
     try {
       const { data } = await api.get("/audit-log", { params: { limit: 100 } });
       setAuditLog(data.items || []);
-    } catch (_e) {
-      /* ignore */
+    } catch (e) {
+      console.error("Failed to load audit log", e);
     } finally {
       setLoadingAudit(false);
     }
@@ -92,9 +93,9 @@ export default function TeamPage() {
   useEffect(() => {
     loadUsers();
     loadAudit();
-  }, [isAdmin]);
+  }, [isPrivileged]);
 
-  if (user && !isAdmin) {
+  if (user && !isPrivileged) {
     return <Navigate to="/people" replace />;
   }
 
@@ -347,82 +348,128 @@ export default function TeamPage() {
               </div>
             ) : (
               <div className="bg-white border border-slate-200 rounded-md divide-y divide-slate-100">
-                {users.map((u) => (
+                {users.map((u) => {
+                  const isTargetOwner = u.role === "owner";
+                  const isSelf = u.id === user.id;
+                  // Password reset button visible when: caller is owner OR caller is resetting own password.
+                  // Never allow anyone to reset the owner's password except the owner themselves.
+                  const canReset = (isOwner || isSelf) && !(isTargetOwner && !isSelf);
+                  // Role toggle: only the owner can promote/demote. Owner and self are always locked.
+                  const canChangeRole = isOwner && !isTargetOwner && !isSelf;
+                  // Delete: never delete owner, never delete self. Admins can delete members.
+                  const canRemove = !isTargetOwner && !isSelf;
+                  const roleClass =
+                    u.role === "owner"
+                      ? "bg-amber-100 text-amber-800"
+                      : u.role === "admin"
+                      ? "bg-indigo-100 text-indigo-700"
+                      : "bg-slate-100 text-slate-700";
+                  const chipClass =
+                    u.role === "owner"
+                      ? "chip bg-amber-50 text-amber-800 border-amber-200"
+                      : u.role === "admin"
+                      ? "chip chip-active"
+                      : "chip chip-paused";
+                  return (
                   <div
                     key={u.id}
                     className="flex items-center gap-3 px-4 py-3"
                     data-testid={`user-row-${u.id}`}
                   >
                     <div
-                      className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-semibold shrink-0 ${
-                        u.role === "admin"
-                          ? "bg-indigo-100 text-indigo-700"
-                          : "bg-slate-100 text-slate-700"
-                      }`}
+                      className={`w-9 h-9 rounded-full flex items-center justify-center text-sm font-semibold shrink-0 ${roleClass}`}
                     >
                       {(u.name || u.email).slice(0, 1).toUpperCase()}
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="text-sm font-medium text-slate-900 truncate">
                         {u.name || u.email.split("@")[0]}
+                        {isSelf && (
+                          <span className="ml-1.5 text-[10px] text-slate-400 font-normal">
+                            (you)
+                          </span>
+                        )}
                       </div>
                       <div className="text-mono text-[12px] text-slate-500 truncate">
                         {u.email}
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <div
-                        className={`chip ${
-                          u.role === "admin" ? "chip-active" : "chip-paused"
-                        }`}
-                      >
-                        {u.role === "admin" ? (
+                      <div className={chipClass} data-testid={`role-chip-${u.id}`}>
+                        {u.role === "owner" ? (
+                          <Shield className="w-3 h-3 mr-1" />
+                        ) : u.role === "admin" ? (
                           <Shield className="w-3 h-3 mr-1" />
                         ) : (
                           <User className="w-3 h-3 mr-1" />
                         )}
                         {u.role}
                       </div>
-                      <Select
-                        value={u.role}
-                        onValueChange={(v) => changeRole(u.id, v)}
-                        disabled={u.id === user.id}
-                      >
-                        <SelectTrigger
-                          className="h-8 text-xs w-24"
-                          data-testid={`role-select-${u.id}`}
+                      {isTargetOwner ? (
+                        // Owner's role is fixed — show a locked placeholder instead of a Select.
+                        <div
+                          className="h-8 text-xs w-24 flex items-center justify-center text-slate-400 border border-slate-200 rounded"
+                          data-testid={`role-locked-${u.id}`}
+                          title="The workspace owner's role is permanent"
                         >
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="member">Member</SelectItem>
-                          <SelectItem value="admin">Admin</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => openReset(u)}
-                        className="text-slate-400 hover:text-indigo-600"
-                        data-testid={`reset-pwd-${u.id}`}
-                        title="Reset password"
-                      >
-                        <KeyRound className="w-3.5 h-3.5" />
-                      </Button>
+                          locked
+                        </div>
+                      ) : (
+                        <Select
+                          value={u.role}
+                          onValueChange={(v) => changeRole(u.id, v)}
+                          disabled={!canChangeRole}
+                        >
+                          <SelectTrigger
+                            className="h-8 text-xs w-24"
+                            data-testid={`role-select-${u.id}`}
+                            title={
+                              !canChangeRole
+                                ? "Only the workspace owner can change roles"
+                                : undefined
+                            }
+                          >
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="member">Member</SelectItem>
+                            <SelectItem value="admin">Admin</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      )}
+                      {canReset && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => openReset(u)}
+                          className="text-slate-400 hover:text-indigo-600"
+                          data-testid={`reset-pwd-${u.id}`}
+                          title={isSelf ? "Reset your password" : "Reset password"}
+                        >
+                          <KeyRound className="w-3.5 h-3.5" />
+                        </Button>
+                      )}
                       <Button
                         variant="ghost"
                         size="icon"
                         onClick={() => setDeleteUser(u)}
-                        disabled={u.id === user.id}
+                        disabled={!canRemove}
                         className="text-slate-400 hover:text-red-600"
                         data-testid={`remove-user-${u.id}`}
-                        title="Remove user"
+                        title={
+                          isTargetOwner
+                            ? "The workspace owner cannot be removed"
+                            : isSelf
+                            ? "You cannot remove yourself"
+                            : "Remove user"
+                        }
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </Button>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </TabsContent>
