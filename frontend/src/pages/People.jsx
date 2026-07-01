@@ -212,14 +212,16 @@ export default function PeoplePage() {
   // Clear selection when filters change
   useEffect(() => {
     setSelectedIds(new Set());
+    setSelectAllMatching(false);
   }, [debounced, companyFilter, inCampaigns.join(","), notInCampaigns.join(","), page]);
 
   const exportCsv = async (format) => {
     try {
-      const hasSelection = selectedIds.size > 0;
-      const url = hasSelection
-        ? `/people/export?format=${format}&ids=${Array.from(selectedIds).join(",")}`
-        : `/people/export?format=${format}`;
+      // If "select all matching" is on OR no explicit selection → export the whole filter (server side).
+      const useFilter = selectAllMatching || selectedIds.size === 0;
+      const url = useFilter
+        ? `/people/export?format=${format}`
+        : `/people/export?format=${format}&ids=${Array.from(selectedIds).join(",")}`;
       const response = await api.post(url, filters, { responseType: "blob" });
       const blobUrl = window.URL.createObjectURL(new Blob([response.data]));
       const a = document.createElement("a");
@@ -228,7 +230,9 @@ export default function PeoplePage() {
       a.click();
       window.URL.revokeObjectURL(blobUrl);
       toast.success(
-        hasSelection
+        selectAllMatching
+          ? `Exported ${data.total.toLocaleString()} matching`
+          : selectedIds.size > 0
           ? `Exported ${selectedIds.size} selected`
           : "Export downloaded"
       );
@@ -238,6 +242,7 @@ export default function PeoplePage() {
   };
 
   const toggleSelect = (id) => {
+    setSelectAllMatching(false);
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -245,6 +250,8 @@ export default function PeoplePage() {
       return next;
     });
   };
+
+  const [selectAllMatching, setSelectAllMatching] = useState(false);
 
   const allVisibleSelected =
     data.items.length > 0 && data.items.every((p) => selectedIds.has(p.id));
@@ -256,6 +263,7 @@ export default function PeoplePage() {
         data.items.forEach((p) => next.delete(p.id));
         return next;
       });
+      setSelectAllMatching(false);
     } else {
       setSelectedIds((prev) => {
         const next = new Set(prev);
@@ -264,6 +272,9 @@ export default function PeoplePage() {
       });
     }
   };
+
+  // Effective selection size — either the actual selected set or ALL matching filter.
+  const effectiveSelectionCount = selectAllMatching ? data.total : selectedIds.size;
 
   const updateRowNotes = (personId, newNotes) => {
     setData((d) => ({
@@ -275,22 +286,39 @@ export default function PeoplePage() {
   const [confirmDelete, setConfirmDelete] = useState(null);
 
   const runBulkDelete = async (mode) => {
-    const ids = Array.from(selectedIds);
-    if (!ids.length) return;
     try {
-      if (mode === "all") {
-        const { data } = await api.post("/people/bulk-delete", { ids });
-        toast.success(`Deleted ${data.deleted} contact${data.deleted === 1 ? "" : "s"}`);
-      } else if (mode === "campaign" && activeCampaignInfo) {
-        const { data } = await api.post("/people/bulk-remove-from-campaign", {
-          ids,
-          campaign_id: activeCampaignInfo.id,
-        });
-        toast.success(
-          `Removed ${data.removed} contact${data.removed === 1 ? "" : "s"} from ${activeCampaignInfo.name}`
-        );
+      if (selectAllMatching) {
+        // Bulk delete by filter — server resolves all matching ids.
+        if (mode === "all") {
+          const { data } = await api.post("/people/delete-by-filter", filters);
+          toast.success(`Deleted ${data.deleted} contact${data.deleted === 1 ? "" : "s"}`);
+        } else if (mode === "campaign" && activeCampaignInfo) {
+          const { data } = await api.post("/people/remove-by-filter-from-campaign", {
+            ...filters,
+            campaign_id: activeCampaignInfo.id,
+          });
+          toast.success(
+            `Removed ${data.removed} contact${data.removed === 1 ? "" : "s"} from ${activeCampaignInfo.name}`
+          );
+        }
+      } else {
+        const ids = Array.from(selectedIds);
+        if (!ids.length) return;
+        if (mode === "all") {
+          const { data } = await api.post("/people/bulk-delete", { ids });
+          toast.success(`Deleted ${data.deleted} contact${data.deleted === 1 ? "" : "s"}`);
+        } else if (mode === "campaign" && activeCampaignInfo) {
+          const { data } = await api.post("/people/bulk-remove-from-campaign", {
+            ids,
+            campaign_id: activeCampaignInfo.id,
+          });
+          toast.success(
+            `Removed ${data.removed} contact${data.removed === 1 ? "" : "s"} from ${activeCampaignInfo.name}`
+          );
+        }
       }
       setSelectedIds(new Set());
+      setSelectAllMatching(false);
       setConfirmDelete(null);
       // Refresh
       const { data: refreshed } = await api.post("/people/query", filters);
@@ -395,7 +423,7 @@ export default function PeoplePage() {
                 onAdded={() => loadCustomColumns(singleCampaignId)}
               />
             )}
-            {selectedIds.size > 0 && (
+            {(selectedIds.size > 0 || selectAllMatching) && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button
@@ -405,7 +433,7 @@ export default function PeoplePage() {
                     className="border-red-200 text-red-700 hover:bg-red-50 hover:text-red-800"
                   >
                     <Trash2 className="w-4 h-4 mr-1.5" />
-                    Delete ({selectedIds.size})
+                    Delete ({effectiveSelectionCount.toLocaleString()})
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="w-64">
@@ -443,13 +471,15 @@ export default function PeoplePage() {
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
-                  variant={selectedIds.size > 0 ? "default" : "outline"}
+                  variant={effectiveSelectionCount > 0 ? "default" : "outline"}
                   size="sm"
                   data-testid="export-btn"
-                  className={selectedIds.size > 0 ? "bg-indigo-600 hover:bg-indigo-700 text-white" : ""}
+                  className={effectiveSelectionCount > 0 ? "bg-indigo-600 hover:bg-indigo-700 text-white" : ""}
                 >
                   <Download className="w-4 h-4 mr-1.5" />
-                  {selectedIds.size > 0
+                  {selectAllMatching
+                    ? `Export ${data.total.toLocaleString()} matching`
+                    : selectedIds.size > 0
                     ? `Export ${selectedIds.size} selected`
                     : "Export"}
                 </Button>
@@ -718,6 +748,41 @@ export default function PeoplePage() {
         </div>
       )}
 
+      {/* Select-all-matching banner: appears when all visible rows are selected AND more matching rows exist off-page */}
+      {allVisibleSelected && data.total > data.items.length && (
+        <div className="border-b border-indigo-200 bg-indigo-50/60 px-6 py-2 flex items-center justify-center gap-2 text-sm">
+          {selectAllMatching ? (
+            <>
+              <span className="text-indigo-900">
+                All <span className="text-mono font-semibold">{data.total.toLocaleString()}</span> contacts matching this filter are selected.
+              </span>
+              <button
+                type="button"
+                data-testid="clear-all-matching"
+                onClick={() => setSelectAllMatching(false)}
+                className="text-indigo-700 hover:text-indigo-900 font-medium underline"
+              >
+                Clear selection
+              </button>
+            </>
+          ) : (
+            <>
+              <span className="text-slate-700">
+                <span className="text-mono font-semibold">{selectedIds.size}</span> on this page selected.
+              </span>
+              <button
+                type="button"
+                data-testid="select-all-matching"
+                onClick={() => setSelectAllMatching(true)}
+                className="text-indigo-700 hover:text-indigo-900 font-medium underline"
+              >
+                Select all {data.total.toLocaleString()} matching this filter
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
       {/* Table */}
       <div className="flex-1 overflow-auto">
         {loading && data.items.length === 0 ? (
@@ -833,10 +898,15 @@ export default function PeoplePage() {
           <DialogHeader>
             <DialogTitle>
               {confirmDelete === "all"
-                ? `Delete ${selectedIds.size} contact${selectedIds.size === 1 ? "" : "s"}?`
-                : `Remove ${selectedIds.size} contact${selectedIds.size === 1 ? "" : "s"} from ${activeCampaignInfo?.name}?`}
+                ? `Delete ${effectiveSelectionCount.toLocaleString()} contact${effectiveSelectionCount === 1 ? "" : "s"}?`
+                : `Remove ${effectiveSelectionCount.toLocaleString()} contact${effectiveSelectionCount === 1 ? "" : "s"} from ${activeCampaignInfo?.name}?`}
             </DialogTitle>
             <DialogDescription>
+              {selectAllMatching && (
+                <span className="block mb-2 text-indigo-700 font-medium">
+                  Applies to ALL contacts matching this filter — including rows on other pages.
+                </span>
+              )}
               {confirmDelete === "all" ? (
                 <>
                   These contacts will be permanently removed from every campaign, every

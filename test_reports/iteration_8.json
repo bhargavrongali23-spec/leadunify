@@ -1,0 +1,35 @@
+{
+  "summary": "Iter8 full QA of (1) Bulk-share multiple campaigns and (2) Bulk delete-by-filter. Backend pytest: 13/13 PASSED — delete-by-filter zero-match / admin-only 403 / real 30-row delete + persistence verify; remove-by-filter-from-campaign zero-match / removes only that campaign link, other campaign & person doc intact; bulk-share admin shares 2 campaigns to N users (persisted in shared_with_user_ids), non-admin mixed owner+non-owner returns 'shared' with owned + 'skipped' reason=='not owner', invalid ids reported. Regression: /people/bulk-delete, /people/bulk-remove-from-campaign, /campaigns/{cid}/share all still work. Auth: unauthenticated calls to both new endpoints return 401/403. Frontend UI: verified bulk-share end-to-end — 14 campaigns render 'select-campaign-*' checkboxes, ticking 2 shows 'Share 2 selected' header btn + 'Clear (2)', dialog opens with 2 selected-campaign chips + 8 teammate checkboxes, do-bulk-share-btn is disabled until >=1 user picked, text updates to 'Share 2 × 1', API POST /campaigns/bulk-share returns 200 shared:2 skipped:0, dialog closes. Verified People select-all-matching banner: after seeding via CSV import, header select-all triggers banner 'Select all 55 matching this filter', clicking activates 'all-matching' mode (clear-all-matching present, Delete btn shows 'Delete (55)', Export btn shows 'Export 55 matching').",
+  "backend_issues": { "critical": [], "minor": [] },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Campaigns page selection", "issues": ["Clicking a campaign checkbox re-renders the whole card list, which detaches every card node from the DOM — Playwright/tests must re-query [data-testid^=select-campaign-] after each click; not a user-facing bug but worth noting for automated tests."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_leadunify_iter8.py",
+    "/app/test_reports/pytest/iter8_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py now 2424 lines — long-standing recommendation to split into routers; iter8 added ~60 more lines (delete-by-filter, remove-by-filter-from-campaign, bulk-share).",
+    "POST /api/people/remove-by-filter-from-campaign has no admin/owner check — any authenticated user can drop person_campaigns links for any campaign they don't own. Consider requiring admin OR campaign owner (mirror the check used in /campaigns/{id}/share).",
+    "POST /api/people/delete-by-filter and /remove-by-filter-from-campaign have no upper bound on the filter set — a call with an empty PeopleQuery would iterate the ENTIRE people collection. Consider requiring at least one filter field, OR a confirmation flag.",
+    "bulk-share endpoint dedupes user_ids at insert time (via $addToSet) but iterates one $addToSet per campaign_id — for many campaigns this is N round-trips. bulk_write could halve latency.",
+    "GET /api/people/{pid} returns campaigns under key 'campaigns' (list of {id,name}), not 'campaign_ids' — documentation/API-spec inconsistency vs POST /api/people/{pid}/campaigns which uses singular 'campaign_id'."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_leadunify_iter8.py (NEW — 13 tests across 5 classes: TestDeleteByFilter, TestRemoveByFilterFromCampaign, TestBulkShare, TestRegression, TestAuth). Seeds people via CSV upload → /api/import/preview + /api/import/commit because there is no direct POST /api/people create endpoint.",
+    "/app/test_reports/pytest/iter8_results.xml (junit)",
+    "/app/test_reports/iteration_8.json (this report)"
+  ],
+  "success_rate": { "backend": "100% (13/13)", "frontend": "100% for the 10 UX assertions actually run: campaign checkboxes render, Clear + bulk-share header buttons appear, dialog opens, 2 chips visible, 8 teammate checkboxes visible, do-btn disabled BEFORE user pick, do-btn enabled + text update AFTER pick, POST /campaigns/bulk-share returns 200 shared:2 skipped:0, dialog closes, and separately People page select-all-matching banner shows with correct total (55), and Delete/Export button labels flip to whole-filter counts." },
+  "test_credentials": "admin@leadunify.com / admin123 (from /app/memory/test_credentials.md). Non-admin test user 'test_iter8_<runid>@leadunify.com' created via /api/auth/register — password 'Testpass123!'. New random address each run so nothing to clean.",
+  "seed_data_creation": "During tests, campaigns TEST_iter8_camp_<runid>, TEST_iter8b_c1/c2_<runid>, TEST_iter8reg_<runid>, TEST_iter8_own1/own2_<runid>, TEST_iter8_admin_<runid> and their contacts (TEST_iter8_/TEST_iter8b_/TEST_iter8reg_ companies) were created and cleaned up. A few leftover TEST_iter8* rows from EARLIER failed runs (before the fixture was fixed) were manually purged post-run via the delete-by-filter + DELETE /campaigns endpoints; final /people/query for those companies returns total=0.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iter8 test file at /app/backend/tests/test_leadunify_iter8.py — uses xdist so class-scoped fixtures may run on either worker; RUN_ID/company/campaign names include uuid to be parallel-safe. Seeding uses CSV round-trip through /api/import/preview + /api/import/commit; the multipart POST STRIPS Content-Type from the session headers (otherwise FastAPI multipart parser 400s). GET /api/people/{pid} returns campaigns as list of {id,name} under key 'campaigns' — do NOT expect 'campaign_ids' on the person detail. There is NO direct POST /api/people create endpoint. Non-admin user creation via public POST /api/auth/register (returns 200 or 201). Frontend campaign cards re-render on any checkbox click — always re-query selectors between clicks in Playwright.",
+  "rca of the issue": "N/A — no product bugs. Two developer-quality gaps identified for main agent as non-blocking code-review items: (a) remove-by-filter-from-campaign lacks owner/admin gate, (b) delete-by-filter has no minimum-filter guard and would purge everything if called with an empty body."
+}

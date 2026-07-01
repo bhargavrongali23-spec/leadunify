@@ -1269,6 +1269,49 @@ async def bulk_remove_from_campaign(
     return {"ok": True, "removed": result.deleted_count}
 
 
+@api.post("/people/delete-by-filter")
+async def delete_people_by_filter(payload: PeopleQuery, user: dict = Depends(get_current_user)):
+    """Delete EVERY person matching the given filter (all pages, not just
+    visible). Admin only. Returns how many were removed."""
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    q = await _build_people_query(payload.model_dump())
+    # Collect all matching ids first so we can also purge their person_campaigns.
+    ids: List[str] = []
+    async for d in db.people.find(q, {"_id": 1}):
+        ids.append(str(d["_id"]))
+    if not ids:
+        return {"ok": True, "deleted": 0}
+    oids = [ObjectId(i) for i in ids if ObjectId.is_valid(i)]
+    result = await db.people.delete_many({"_id": {"$in": oids}})
+    await db.person_campaigns.delete_many({"person_id": {"$in": ids}})
+    return {"ok": True, "deleted": result.deleted_count}
+
+
+class RemoveByFilterFromCampaignInput(PeopleQuery):
+    campaign_id: str
+
+
+@api.post("/people/remove-by-filter-from-campaign")
+async def remove_by_filter_from_campaign(
+    payload: RemoveByFilterFromCampaignInput, user: dict = Depends(get_current_user)
+):
+    """Remove EVERY person matching the given filter from a specific campaign.
+    The person records themselves stay; only the person_campaigns links are
+    dropped for the specified campaign."""
+    q = await _build_people_query(payload.model_dump(exclude={"campaign_id"}))
+    ids: List[str] = []
+    async for d in db.people.find(q, {"_id": 1}):
+        ids.append(str(d["_id"]))
+    if not ids:
+        return {"ok": True, "removed": 0}
+    result = await db.person_campaigns.delete_many({
+        "person_id": {"$in": ids},
+        "campaign_id": payload.campaign_id,
+    })
+    return {"ok": True, "removed": result.deleted_count}
+
+
 # ---------------------------------------------------------------------------
 # Import — preview + commit
 # ---------------------------------------------------------------------------
@@ -2169,6 +2212,54 @@ async def share_campaign(
 
 class UnshareCampaignInput(BaseModel):
     user_id: str
+
+
+class BulkShareCampaignsInput(BaseModel):
+    campaign_ids: List[str]
+    user_ids: List[str]
+
+
+@api.post("/campaigns/bulk-share")
+async def bulk_share_campaigns(
+    payload: BulkShareCampaignsInput, user: dict = Depends(get_current_user)
+):
+    """Share MANY campaigns with the same set of users at once.
+
+    Only campaigns the caller owns (or all, if admin) will be touched. Skipped
+    campaigns are reported back so the UI can surface which ones the user
+    doesn't have permission to share."""
+    is_admin = user.get("role") == "admin"
+    uid = str(user["_id"])
+
+    # dedupe + validate user ids exist
+    valid_user_ids: List[str] = []
+    for user_id in payload.user_ids:
+        if not ObjectId.is_valid(user_id):
+            continue
+        u = await db.users.find_one({"_id": ObjectId(user_id)}, {"_id": 1})
+        if u:
+            valid_user_ids.append(str(u["_id"]))
+
+    shared: List[str] = []
+    skipped: List[dict] = []
+    for cid in payload.campaign_ids:
+        if not ObjectId.is_valid(cid):
+            skipped.append({"campaign_id": cid, "reason": "invalid id"})
+            continue
+        oid = ObjectId(cid)
+        camp = await db.campaigns.find_one({"_id": oid})
+        if not camp:
+            skipped.append({"campaign_id": cid, "reason": "not found"})
+            continue
+        if not is_admin and camp.get("owner_id") != uid:
+            skipped.append({"campaign_id": cid, "reason": "not owner", "name": camp.get("name")})
+            continue
+        await db.campaigns.update_one(
+            {"_id": oid},
+            {"$addToSet": {"shared_with_user_ids": {"$each": valid_user_ids}}},
+        )
+        shared.append(cid)
+    return {"ok": True, "shared": shared, "skipped": skipped, "user_ids": valid_user_ids}
 
 
 @api.post("/campaigns/{campaign_id}/unshare")
